@@ -23,7 +23,7 @@ on:
         default: "argocd"
       argocd_chart_version:
         type: string
-        default: ""
+        default: "10.1.1"
       gitops_repo_raw_url:
         type: string
         required: true
