@@ -1,0 +1,111 @@
+name: destroy-all
+
+# FULL TEARDOWN of an environment.
+#
+# Order:
+#   1. deregister-from-argocd - spoke must be pulled out of the hub's
+#      ArgoCD inventory FIRST. This step runs SSM commands against the HUB
+#      master, so it must complete (and the hub master must still be
+#      alive) before either cluster's terraform destroy can safely run.
+#   2. drain-spoke + drain-hub - run IN PARALLEL. Both only need
+#      deregistration to have completed; draining one cluster's PVCs has
+#      no dependency on the other's.
+#   3. terraform-destroy-spoke + terraform-destroy-hub - run IN PARALLEL,
+#      each gated only on its own cluster's drain having finished.
+#   4. network - the shared Transit Gateway, destroyed last since both
+#      live/hub and live/spoke read its state via terraform_remote_state.
+#
+# This is the REVERSE of deploy-all.yml's bring-up order in spirit (network
+# still goes first on the way up, last on the way down), but spoke and hub
+# themselves are no longer strictly sequential on the way down - only the
+# ArgoCD deregistration step forces an ordering constraint, because it's
+# the one phase that depends on the *other* cluster (the hub) still being
+# up while it runs.
+#
+# For tearing down a single cluster only, use destroy-spoke.yml or
+# destroy-hub.yml directly instead - this workflow destroys everything
+# in the given environment, including the shared Transit Gateway that
+# any other spoke (e.g. live/spoke-2) also depends on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to destroy (backend.hcl + terraform.tfvars must exist for it in every root)"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      spoke_dir:
+        description: "Path to the spoke root to tear down"
+        required: false
+        type: string
+        default: "live/spoke"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deregister-from-argocd:
+    name: "1. deregister spoke from hub argocd"
+    uses: ./.github/workflows/k8s-deregister-from-hub.yml
+    with:
+      spoke_dir: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+      hub_env: hub-${{ inputs.environment }}
+      aws_region: ${{ vars.AWS_REGION }}
+    secrets:
+      ARGOCD_REGISTRATION_ROLE_ARN: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
+
+  drain-spoke:
+    name: "2a. drain spoke cluster"
+    needs: deregister-from-argocd
+    uses: ./.github/workflows/drain-cluster.yml
+    with:
+      working_directory: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+      aws_region: ${{ vars.AWS_REGION }}
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+  drain-hub:
+    name: "2b. drain hub cluster (parallel with 2a)"
+    needs: deregister-from-argocd
+    uses: ./.github/workflows/drain-cluster.yml
+    with:
+      working_directory: live/hub
+      environment: ${{ inputs.environment }}
+      aws_region: ${{ vars.AWS_REGION }}
+      freeze_argocd_namespace: "argocd"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+  terraform-destroy-spoke:
+    name: "3a. terraform destroy spoke"
+    needs: drain-spoke
+    uses: ./.github/workflows/terraform-destroy-spoke.yml
+    with:
+      spoke_dir: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+  terraform-destroy-hub:
+    name: "3b. terraform destroy hub (parallel with 3a)"
+    needs: drain-hub
+    uses: ./.github/workflows/terraform-destroy-hub.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+  network:
+    name: "4. network"
+    needs: [terraform-destroy-spoke, terraform-destroy-hub]
+    uses: ./.github/workflows/destroy-network.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit

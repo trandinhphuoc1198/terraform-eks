@@ -1,0 +1,41 @@
+name: terraform-destroy-spoke
+
+# Runs `terraform destroy` for a spoke root. Split out of destroy-spoke.yml
+# so destroy-all.yml can run this in parallel with terraform-destroy-hub.yml
+# once both clusters have finished draining PVCs (see destroy-all.yml).
+# Assumes drain-spoke-pvcs.yml (and, transitively, k8s-deregister-from-hub.yml)
+# already ran - this workflow does not enforce that itself, the caller does
+# via `needs:`.
+#
+# The actual terraform init/plan -destroy/apply steps live in the shared
+# terraform-apply.yml reusable workflow.
+
+on:
+  workflow_call:
+    inputs:
+      spoke_dir:
+        type: string
+        default: "live/spoke"
+      environment:
+        type: string
+        required: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-destroy-spoke:
+    name: "terraform destroy spoke infra (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    uses: ./.github/workflows/terraform-apply.yml
+    with:
+      working_directory: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+      destroy: true
+      extra_tf_vars: "network_state_key=global/network/${{ inputs.environment }}/terraform.tfstate"
+      aws_region: ap-northeast-1
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}

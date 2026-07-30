@@ -1,0 +1,113 @@
+name: terraform-ci
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "**/*.pkr.hcl"
+      - "packer/ansible/**"
+      - ".tflint.hcl"
+      - ".github/workflows/terraform.yml"
+  push:
+  workflow_dispatch:
+
+jobs:
+  fmt-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.0"
+      - name: terraform fmt (check only, no changes)
+        run: terraform fmt -recursive -check -diff
+
+  # validate + tflint run per-root, since each root has its own providers/
+  # backend and `terraform validate` needs an `init` first. global/network
+  # and each live/* directory are validated independently.
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        root: [global/network, live/hub, live/spoke]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.0"
+
+      # backend=false: this job never needs real AWS credentials or state,
+      # it only checks that the config is internally consistent.
+      - name: terraform init (no backend)
+        working-directory: ${{ matrix.root }}
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        working-directory: ${{ matrix.root }}
+        run: terraform validate
+
+  tflint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        root: [global/network, live/hub, live/spoke]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.53.0"
+          
+      - name: tflint init
+        run: tflint --init --config ${{ github.workspace }}/.tflint.hcl
+        working-directory: ${{ matrix.root }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: tflint run
+        run: tflint --config ${{ github.workspace }}/.tflint.hcl
+        working-directory: ${{ matrix.root }}
+
+  # Static checks only - no AWS credentials in CI, so this can't actually
+  # launch the build instance. `packer validate` catches HCL/syntax errors;
+  # `ansible-lint` catches obvious playbook mistakes before merge.
+  packer-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-packer@main
+        with:
+          version: "1.11.0"
+      - name: packer init
+        working-directory: packer
+        run: packer init .
+      - name: packer fmt (check only)
+        working-directory: packer
+        run: packer fmt -check -diff .
+      - name: packer validate
+        working-directory: packer
+        run: |
+          packer validate \
+            -var="subnet_id=subnet-00000000000000000" \
+            -var="vpc_id=vpc-00000000000000000" \
+            .
+      - name: Install ansible-lint
+        run: pip install --break-system-packages ansible-lint
+
+      - name: Install Ansible collections
+        working-directory: packer/ansible
+        run: ansible-galaxy collection install -r requirements.yml
+      - name: ansible-lint
+        working-directory: packer/ansible
+        run: ansible-lint playbook.yml
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: .
+          

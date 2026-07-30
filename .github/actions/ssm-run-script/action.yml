@@ -1,0 +1,99 @@
+name: "SSM Run Script"
+description: >
+  Sends a local script to an EC2 instance via `aws ssm send-command`
+  (AWS-RunShellScript) and polls `get-command-invocation` until the
+  command reaches a terminal state. Centralizes the send/poll loop that
+  used to be copy-pasted across every workflow that talks to a master
+  node over SSM (k8s-cluster-bootstrap, k8s-bootstrap-argocd,
+  k8s-register-with-hub, k8s-deregister-from-hub, drain-hub-pvcs,
+  drain-spoke-pvcs).
+
+inputs:
+  instance-id:
+    description: "EC2 instance ID to run the script on"
+    required: true
+  script-path:
+    description: >
+      Path to the local script file to upload and run. Resolved relative
+      to the repository root (GITHUB_WORKSPACE) - composite action steps
+      do NOT inherit the calling job's `defaults.run.working-directory`,
+      so pass an absolute path (e.g. /tmp/foo.sh) or a path relative to
+      the repo root (e.g. .github/scripts/foo.sh.tpl), never a path
+      relative to a job's working-directory like live/hub.
+    required: true
+  timeout-seconds:
+    description: "SSM send-command --timeout-seconds value"
+    required: false
+    default: "900"
+  max-poll-attempts:
+    description: "How many times to poll get-command-invocation before giving up"
+    required: false
+    default: "90"
+  poll-interval-seconds:
+    description: "Seconds to sleep between polls"
+    required: false
+    default: "10"
+  fail-on-error:
+    description: >
+      If "true" (default), this step fails when the command does not end
+      in Success. Set to "false" for best-effort callers (e.g. PVC drains)
+      that want to inspect the `status` output themselves and decide how
+      to react without failing the job.
+    required: false
+    default: "true"
+
+outputs:
+  cmd_id:
+    description: "The SSM Command ID - use this to fetch stdout/stderr afterward"
+    value: ${{ steps.run.outputs.cmd_id }}
+  status:
+    description: "Final status: Success, Failed, Cancelled, TimedOut, or Timeout (our own poll-exhausted state)"
+    value: ${{ steps.run.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: run
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        B64=$(base64 -w0 "${{ inputs.script-path }}")
+        CMD_ID=$(aws ssm send-command \
+          --instance-ids "${{ inputs.instance-id }}" \
+          --document-name "AWS-RunShellScript" \
+          --timeout-seconds "${{ inputs.timeout-seconds }}" \
+          --parameters "commands=[\"echo $B64 | base64 -d > /tmp/ssm-run-script.sh\", \"chmod +x /tmp/ssm-run-script.sh\", \"/tmp/ssm-run-script.sh\"]" \
+          --query "Command.CommandId" --output text)
+        echo "cmd_id=$CMD_ID" >> "$GITHUB_OUTPUT"
+        echo "Sent command $CMD_ID to ${{ inputs.instance-id }}"
+
+        MAX="${{ inputs.max-poll-attempts }}"
+        INTERVAL="${{ inputs.poll-interval-seconds }}"
+        STATUS="Timeout"
+
+        for i in $(seq 1 "$MAX"); do
+          CURRENT=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ inputs.instance-id }}" \
+            --query "Status" --output text 2>/dev/null || echo "Pending")
+
+          case "$CURRENT" in
+            Success|Failed|Cancelled|TimedOut)
+              STATUS="$CURRENT"
+              break
+              ;;
+            *)
+              echo "Status: $CURRENT (attempt $i/$MAX)"
+              sleep "$INTERVAL"
+              ;;
+          esac
+        done
+
+        echo "Final status: $STATUS"
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+        if [ "$STATUS" != "Success" ] && [ "${{ inputs.fail-on-error }}" = "true" ]; then
+          echo "::error::SSM command $CMD_ID ended with status $STATUS"
+          exit 1
+        fi

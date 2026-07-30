@@ -1,0 +1,142 @@
+name: k8s-deregister-from-hub
+
+# Spoke only. Temporarily removes a spoke cluster from ArgoCD's LIVE
+# inventory before any infra teardown happens, so there is no window in
+# which ArgoCD's selfHeal could recreate a workload while destroy-spoke's
+# PVC drain step is running.
+#
+# TEMPORARY BY DESIGN - this never touches git. It deletes the spoke's
+# ArgoCD Applications and its ExternalSecret/Secret directly on the hub
+# cluster. root-clusters (an ArgoCD Application with selfHeal: true
+# watching argocd/clusters/) will recreate the ExternalSecret from git on
+# its own next reconcile (default ~3 min) - that's expected and harmless
+# here: by the time it does, the spoke cluster this workflow is tearing
+# down is either already gone or mid-destroy, so there's nothing left for
+# ArgoCD to actually schedule anything onto. If you want a PERMANENT
+# deregistration instead (e.g. retiring a spoke for good), delete
+# argocd/clusters/<cluster_name>.yaml from the gitops repo yourself - that
+# is a deliberate, separate action from this workflow.
+#
+# What "race-free" means here: this deletes every ArgoCD Application
+# generated for this spoke (spokes/infra/**, spokes/workloads/**) with
+# `--cascade=foreground --wait`, which blocks until every child resource -
+# namespaces, Deployments, StatefulSets, and any standalone PVCs rendered
+# directly by a chart - is actually gone from the spoke, not just until the
+# Application object is marked Deleting. Only after that succeeds does it
+# remove the cluster's ExternalSecret + Secret, which is what every
+# spokes/ ApplicationSet's `clusters` generator uses to know this spoke
+# exists at all - while that's gone, nothing can recreate anything on the
+# spoke, for as long as this workflow's own run takes (the guarantee window
+# closes once root-clusters resyncs, see above).
+#
+# This intentionally does NOT tolerate failure: if deregistration can't be
+# confirmed, the job fails rather than letting the destroy pipeline proceed
+# into a drain step that might still be racing ArgoCD.
+#
+# PVCs created via a StatefulSet's volumeClaimTemplate (Prometheus, Tempo
+# ingester) are NOT deleted by ArgoCD's Application prune - Kubernetes
+# deliberately leaves those unowned so they survive pod/StatefulSet
+# recreation. After this workflow, they're simply idle (no pod holds them
+# anymore) - the existing drain-pvcs.sh.tpl step in destroy-spoke.yml is
+# what actually deletes them and triggers the EBS DeleteVolume calls, and
+# now runs risk-free.
+#
+# Reuses the ARGOCD_REGISTRATION_ROLE_ARN role already granted in
+# live/hub/main.tf for verify-spoke-registration.yml - no new IAM/Terraform
+# changes needed. That role already has everything this workflow needs:
+# ec2:DescribeInstances (find the hub master) and ssm:SendCommand /
+# GetCommandInvocation scoped to that instance. What actually happens on
+# the hub (kubectl delete applications/externalsecrets/secrets) is governed
+# by the cluster-admin kubeconfig already on that box, not by this IAM role.
+#
+# The actual send-command + poll loop lives in the shared
+# .github/actions/ssm-run-script composite action.
+
+on:
+  workflow_call:
+    inputs:
+      spoke_dir:
+        description: "Path to the spoke root, e.g. live/spoke or live/spoke-2"
+        type: string
+        default: "live/spoke"
+      environment:
+        description: "envs/<environment> folder to read cluster_name from"
+        type: string
+        required: true
+      hub_env:
+        description: "Hub environment, e.g. hub-dev - used to locate the hub master by its Name tag"
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+    secrets:
+      ARGOCD_REGISTRATION_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deregister:
+    name: "deregister from hub argocd (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read cluster_name from tfvars
+        id: cluster
+        working-directory: ${{ inputs.spoke_dir }}
+        run: |
+          NAME=$(grep -E '^cluster_name' "envs/${{ inputs.environment }}/terraform.tfvars" | cut -d'"' -f2)
+          if [ -z "$NAME" ]; then
+            echo "::error::Could not read cluster_name from ${{ inputs.spoke_dir }}/envs/${{ inputs.environment }}/terraform.tfvars"
+            exit 1
+          fi
+          echo "Resolved cluster_name: $NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Locate hub master instance
+        id: hub_instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ inputs.hub_env }}-k8s-master" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
+            echo "::error::No running hub master found for ${{ inputs.hub_env }}"
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Render deregistration script
+        run: |
+          sed "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
+            .github/scripts/deregister-from-hub.sh.tpl > /tmp/deregister-from-hub.sh
+
+      - name: Deregister spoke from ArgoCD (blocks until fully confirmed gone)
+        id: deregister
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.hub_instance.outputs.id }}
+          script-path: /tmp/deregister-from-hub.sh
+          timeout-seconds: "900"
+          max-poll-attempts: "80"
+          poll-interval-seconds: "10"
+
+      - name: Explain failure
+        if: failure()
+        run: echo "::error::Deregistration ended with a non-success status (${{ steps.deregister.outputs.status }}) - the cluster may still be tracked by ArgoCD. Not safe to proceed with destroy."
+
+      - name: Show deregistration output
+        if: always()
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.deregister.outputs.cmd_id }}" \
+            --instance-id "${{ steps.hub_instance.outputs.id }}" \
+            --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}" || true

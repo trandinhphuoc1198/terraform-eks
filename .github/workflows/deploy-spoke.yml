@@ -1,0 +1,94 @@
+name: deploy-spoke
+
+# Deploys/updates ONE spoke cluster: terraform apply, kubeadm bootstrap,
+# push registration token to Secrets Manager, then verify the cluster
+# actually registered in the hub's Argo CD.
+#
+# REFACTORED: this used to duplicate deploy-spoke-infra.yml's three jobs
+# verbatim. It now just chains the two reusable workflows that already
+# implement each half of the pipeline:
+#   1. deploy-spoke-infra.yml  - terraform apply -> kubeadm bootstrap ->
+#      push argocd-manager token to Secrets Manager
+#   2. verify-spoke-registration.yml - waits for ESO/root-clusters to
+#      materialize the registration Secret on the hub
+#
+# deploy-all.yml calls these same two reusable workflows directly instead
+# (in parallel with deploy-hub.yml, since spoke's terraform state has no
+# dependency on hub's - see that file's header comment). This workflow
+# exists for the common "day-2 single spoke change, I want the full chain
+# in one run" case, without hand-duplicating deploy-spoke-infra.yml's
+# steps here too.
+#
+# Requires the hub's Argo CD to already be installed (deploy-hub.yml) -
+# that's a real dependency (this cluster is registering *into* the hub's
+# Argo CD), not just a CI artifact. For a brand-new environment, run
+# deploy-all.yml instead, or run deploy-hub.yml once first.
+#
+# `spoke_dir` lets this same workflow drive additional spokes later
+# (e.g. live/spoke-2) without copy-pasting new workflow jobs - see the
+# README's "Adding a second spoke later" section.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to deploy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      spoke_dir:
+        description: "Path to the spoke root to operate on"
+        required: false
+        type: string
+        default: "live/spoke"
+      cluster_role:
+        description: "Label value for cluster-role, e.g. workload"
+        required: true
+        type: string
+        default: "workload"
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      spoke_dir:
+        type: string
+        default: "live/spoke"
+      cluster_role:
+        type: string
+        default: "workload"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+      ARGOCD_REGISTRATION_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ── 1-3. spoke infra: terraform apply -> kubeadm bootstrap -> push token ──
+  spoke-infra:
+    name: "spoke infra (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    uses: ./.github/workflows/deploy-spoke-infra.yml
+    with:
+      environment: ${{ inputs.environment }}
+      spoke_dir: ${{ inputs.spoke_dir }}
+      cluster_role: ${{ inputs.cluster_role }}
+    secrets: inherit
+
+  # ── 4. verify ArgoCD registered the spoke ─────────────────────────────────
+  register-spoke:
+    name: "verify spoke registered with hub argocd (${{ inputs.environment }})"
+    needs: spoke-infra
+    uses: ./.github/workflows/verify-spoke-registration.yml
+    with:
+      spoke_cluster_name: ${{ needs.spoke-infra.outputs.cluster_name }}
+      hub_env: hub-${{ inputs.environment }}
+      cluster_role: ${{ inputs.cluster_role }}
+      cluster_env: ${{ inputs.environment }}
+    secrets: inherit

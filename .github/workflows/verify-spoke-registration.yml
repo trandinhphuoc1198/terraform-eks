@@ -1,0 +1,122 @@
+name: verify-spoke-registration
+
+# Terraform/CI's job stops at pushing {name, role, server, token, caData} to
+# Secrets Manager (see k8s-register-with-hub.yml / register-with-hub.sh.tpl)
+# - that's the one thing only CI can produce. Registering the cluster with
+# ArgoCD is a GitOps fact: add argocd/clusters/<name>.yaml to the gitops
+# repo once (copy an existing spoke file, rename) and ESO + root-clusters
+# do the rest, no CI step needed on every deploy.
+#
+# What THIS workflow does now: waits for that pipeline to actually finish
+# and fails the job loudly if it hasn't, instead of silently assuming
+# ESO will get there eventually. Verification now filters directly on the
+# cluster-name label (templated by the ExternalSecret from the pushed
+# secret's own "name" field) instead of listing by role and grepping.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spoke_cluster_name:
+        description: "Must match cluster_name in that spoke's tfvars, e.g. spoke-dev-k8s"
+        required: true
+      hub_env:
+        description: "Hub environment, e.g. hub-dev"
+        required: true
+        default: "hub-dev"
+      cluster_role:
+        description: "Informational only now - surfaced in the timeout error message. Verification itself filters by cluster-name, not cluster-role."
+        required: false
+        default: "workload"
+      cluster_env:
+        description: "Optional - informational only, surfaced in the timeout error message"
+        required: false
+        default: ""
+      timeout_minutes:
+        description: "How long to wait for ESO to materialize the registration Secret (ESO refreshInterval is 5m)"
+        required: false
+        default: "10"
+  workflow_call:
+    inputs:
+      spoke_cluster_name:
+        type: string
+        required: true
+      hub_env:
+        type: string
+        required: true
+      cluster_role:
+        type: string
+        default: "workload"
+      cluster_env:
+        type: string
+        default: ""
+      timeout_minutes:
+        type: string
+        default: "10"
+    secrets:
+      ARGOCD_REGISTRATION_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify-registration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Confirm credentials landed in Secrets Manager
+        run: |
+          aws secretsmanager describe-secret \
+            --secret-id "argocd-clusters/${{ inputs.spoke_cluster_name }}" \
+            --query "Name" --output text
+
+      - name: Locate hub master instance
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ inputs.hub_env }}-k8s-master" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
+            echo "::error::No running hub master found for ${{ inputs.hub_env }}"
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      # Polls instead of applying anything - the ExternalSecret is git-owned
+      # (argocd/clusters/<name>.yaml) and ESO/root-clusters materialize the
+      # cluster Secret on their own schedule. This just confirms it happened.
+      #
+      # Filters directly on the cluster-name label, which the ExternalSecret
+      # now templates from the pushed secret's own "name" field - no more
+      # role-list + grep round trip.
+      - name: Wait for ESO to materialize the cluster registration Secret
+        run: |
+          DEADLINE=$(( $(date +%s) + ${{ inputs.timeout_minutes }} * 60 ))
+          while true; do
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "${{ steps.instance.outputs.id }}" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["KUBECONFIG=/home/ec2-user/.kube/config kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=cluster,cluster-name='"${{ inputs.spoke_cluster_name }}"' --no-headers 2>/dev/null || true"]' \
+              --query "Command.CommandId" --output text)
+            aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" || true
+            OUT=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" \
+              --query StandardOutputContent --output text)
+
+            if [ -n "$(echo "$OUT" | tr -d '[:space:]')" ]; then
+              echo "Registration confirmed: $OUT"
+              exit 0
+            fi
+
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::Timed out waiting for ESO/root-clusters to register ${{ inputs.spoke_cluster_name }} (label cluster-name=${{ inputs.spoke_cluster_name }}, expected role=${{ inputs.cluster_role }}, env=${{ inputs.cluster_env }}). Check: 1) is argocd/clusters/${{ inputs.spoke_cluster_name }}.yaml committed to the gitops repo? 2) did root-clusters sync? 3) does the ClusterSecretStore's aws-creds secret have SecretsManager read access? 4) does the pushed secret in Secrets Manager actually contain a 'name' field matching '${{ inputs.spoke_cluster_name }}'?"
+              exit 1
+            fi
+
+            echo "Not registered yet, retrying in 30s..."
+            sleep 30
+          done

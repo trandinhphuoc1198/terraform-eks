@@ -1,0 +1,192 @@
+name: drain-cluster
+
+# Drains a cluster's remaining PersistentVolumeClaims AND deletes any
+# type=LoadBalancer Services (so CCM removes the NLB/ALB it provisioned)
+# before that cluster's infra is torn down.
+#
+# Replaces the previous drain-hub-pvcs.yml / drain-spoke-pvcs.yml, which
+# were identical except for a hardcoded working-directory - this takes it
+# as an input instead. Called by destroy-hub.yml, destroy-spoke.yml, and
+# destroy-all.yml (in parallel, once per cluster).
+#
+# Must run AFTER k8s-deregister-from-hub.yml on a spoke (nodes/CSI driver
+# and CCM need to still be alive, and ArgoCD must no longer be able to
+# resurrect anything on that spoke while draining) - the hub has no
+# equivalent deregistration step, so it can run directly.
+#
+# Best-effort throughout: a stuck PVC or load balancer logs a warning
+# rather than failing the job, since the whole point of the destroy
+# pipeline is to tear the cluster down regardless. Both send-command +
+# poll loops live in the shared .github/actions/ssm-run-script composite
+# action (fail-on-error: "false" so this workflow can inspect status
+# itself and warn instead of failing).
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Root directory of the cluster to drain, e.g. live/hub, live/spoke, or live/spoke-2"
+        type: string
+        required: true
+      environment:
+        description: "envs/<environment> folder to read backend.hcl + cluster_name from"
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      freeze_argocd_namespace:
+       description: If set, scales argocd-application-controller and argocd-applicationset-controller to 0 replicas on THIS cluster
+       type: string
+       default: ""
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  drain:
+    name: "drain cluster (${{ inputs.working_directory }}, ${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.0"
+
+      - name: terraform init
+        run: terraform init -backend-config="envs/${{ inputs.environment }}/backend.hcl"
+
+      - name: Capture master instance id
+        id: instance
+        run: echo "id=$(terraform output -raw master_instance_id 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+
+      - name: Read cluster_name from tfvars
+        id: cluster
+        run: |
+          NAME=$(grep -E '^cluster_name' "envs/${{ inputs.environment }}/terraform.tfvars" | cut -d'"' -f2)
+          if [ -z "$NAME" ]; then
+            echo "::error::Could not read cluster_name from ${{ inputs.working_directory }}/envs/${{ inputs.environment }}/terraform.tfvars"
+            exit 1
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check SSM agent status
+        id: ssm_check
+        if: steps.instance.outputs.id != ''
+        run: |
+          INSTANCE_ID="${{ steps.instance.outputs.id }}"
+          STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --query "InstanceInformationList[0].PingStatus" \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$STATUS" = "Online" ]; then
+            echo "online=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "online=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SSM agent not reachable on $INSTANCE_ID - skipping drain. \
+            CSI-backed EBS volumes and CCM-provisioned load balancers may be orphaned. \
+            Check the AWS Console after this run and delete manually if needed."
+          fi
+
+      # ── Freeze local ArgoCD (only set by callers whose cluster runs
+      #    ArgoCD itself - currently only live/hub) ──────────────────────
+      - name: Render ArgoCD freeze script
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true' && inputs.freeze_argocd_namespace != ''
+        run: |
+          sed "s|__ARGOCD_NAMESPACE__|${{ inputs.freeze_argocd_namespace }}|g" \
+            ../../.github/scripts/freeze-argocd.sh.tpl > /tmp/freeze-argocd.sh
+
+      - name: Freeze local ArgoCD controllers (stop selfHeal before draining this cluster's own workloads)
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true' && inputs.freeze_argocd_namespace != ''
+        id: freeze_argocd
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/freeze-argocd.sh
+          timeout-seconds: "180"
+          max-poll-attempts: "20"
+          poll-interval-seconds: "5"
+          fail-on-error: "false"
+
+      - name: Warn if ArgoCD freeze did not complete cleanly
+        if: steps.freeze_argocd.outputs.status != '' && steps.freeze_argocd.outputs.status != 'Success'
+        run: |
+          echo "::warning::ArgoCD freeze command ended with status ${{ steps.freeze_argocd.outputs.status }} - \
+          selfHeal may still be active during this drain, risking a recreate race against deleted namespaces/Services."
+
+      # ── LoadBalancer (NLB/ALB) drain ──────────────────────────────────
+      - name: Render load balancer drain script
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        run: |
+          sed "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
+            ../../.github/scripts/drain-loadbalancers.sh.tpl > /tmp/drain-loadbalancers.sh
+
+      - name: Drain LoadBalancer Services (let CCM remove its NLB/ALB before teardown)
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        id: drain_lb
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/drain-loadbalancers.sh
+          timeout-seconds: "420"
+          max-poll-attempts: "40"
+          poll-interval-seconds: "10"
+          fail-on-error: "false"
+
+      # ── PVC drain ──────────────────────────────────────────────────────
+      - name: Drain PVCs (release CSI-backed EBS volumes before teardown)
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        id: drain_pvcs
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: .github/scripts/drain-pvcs.sh.tpl
+          timeout-seconds: "600"
+          max-poll-attempts: "55"
+          poll-interval-seconds: "10"
+          fail-on-error: "false"
+      - name: Warn if PVC drain did not complete cleanly
+        if: steps.drain_pvcs.outputs.status != '' && steps.drain_pvcs.outputs.status != 'Success'
+        run: |
+          echo "::warning::PVC drain command ended with status ${{ steps.drain_pvcs.outputs.status }} - some volumes may \
+          not have been released cleanly. Check the AWS Console for leftover volumes \
+          tagged ebs.csi.aws.com/cluster=true after this run."
+
+      - name: Show PVC drain output
+        if: steps.drain_pvcs.outputs.cmd_id != ''
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.drain_pvcs.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "StandardOutputContent" --output text || true
+
+      - name: Warn if load balancer drain did not complete cleanly
+        if: steps.drain_lb.outputs.status != '' && steps.drain_lb.outputs.status != 'Success'
+        run: |
+          echo "::warning::Load balancer drain command ended with status ${{ steps.drain_lb.outputs.status }} - some \
+          NLBs/ALBs may not have been released cleanly. Check the AWS Console (ELBv2) for leftover \
+          load balancers tagged kubernetes.io/cluster/${{ steps.cluster.outputs.name }}=owned after this run."
+
+      - name: Show load balancer drain output
+        if: steps.drain_lb.outputs.cmd_id != ''
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.drain_lb.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "StandardOutputContent" --output text || true

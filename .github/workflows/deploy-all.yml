@@ -1,0 +1,90 @@
+name: deploy-all
+
+# FIRST-TIME BRING-UP ONLY. Chains network -> {hub, spoke-infra} in parallel
+# -> spoke-register. For any day-2 change to a single cluster, use
+# deploy-network.yml, deploy-hub.yml, or deploy-spoke.yml directly instead.
+#
+# Why hub and spoke run in parallel here: live/spoke's terraform state has
+# no dependency on live/hub's - hub_vpc_cidr is a plain tfvar string, not a
+# terraform_remote_state read, and both only read global/network's state
+# (already applied by the time this job starts). So spoke's terraform
+# apply + kubeadm bootstrap + push-token-to-Secrets-Manager can all happen
+# while hub's terraform apply + kubeadm bootstrap + Argo CD install are
+# also happening.
+#
+# The one step that CANNOT run in parallel is the final registration
+# verify (verify-spoke-registration.yml): it looks up the hub's master
+# instance by tag with no retry on that lookup, and needs the hub's Argo
+# CD + ESO actually running to materialize the registration Secret. So
+# that job explicitly needs both `hub` and `spoke-infra` to finish first.
+#
+# This replaces the old deploy-infra.yml, which mixed hub and spoke jobs
+# into one non-reusable DAG - that meant a spoke-only change always forced
+# hub's bootstrap-argocd job to run too, and adding a second spoke meant
+# hand-duplicating four more jobs into that file. deploy-spoke.yml's
+# `spoke_dir` input solves the second problem; splitting into separate
+# workflows solves the first; splitting spoke further into
+# deploy-spoke-infra.yml + verify-spoke-registration.yml solves parallelism.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to deploy (backend.hcl + terraform.tfvars must exist for it in every root)"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      spoke_dir:
+        description: "Path to the spoke root to bring up"
+        required: false
+        type: string
+        default: "live/spoke"
+      cluster_role:
+        description: "Label value for cluster-role, e.g. workload"
+        required: true
+        type: string
+        default: "workload"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  network:
+    name: "1. network"
+    uses: ./.github/workflows/deploy-network.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  hub:
+    name: "2a. hub"
+    needs: network
+    uses: ./.github/workflows/deploy-hub.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  spoke-infra:
+    name: "2b. spoke infra (parallel with hub)"
+    needs: network
+    uses: ./.github/workflows/deploy-spoke-infra.yml
+    with:
+      environment: ${{ inputs.environment }}
+      spoke_dir: ${{ inputs.spoke_dir }}
+      cluster_role: ${{ inputs.cluster_role }}
+    secrets: inherit
+
+  spoke-register:
+    name: "3. verify spoke registered with hub argocd"
+    needs: [hub, spoke-infra]
+    uses: ./.github/workflows/verify-spoke-registration.yml
+    with:
+      spoke_cluster_name: ${{ needs.spoke-infra.outputs.cluster_name }}
+      hub_env: hub-${{ inputs.environment }}
+      cluster_role: ${{ inputs.cluster_role }}
+      cluster_env: ${{ inputs.environment }}
+    secrets: inherit

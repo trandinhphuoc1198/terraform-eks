@@ -1,0 +1,50 @@
+name: deploy-network
+
+# Shared Transit Gateway (global/network). Applied rarely - only when the
+# TGW itself changes (e.g. adding amazon_side_asn changes, which shouldn't
+# happen often) or on first-time bring-up. Independent of hub/spoke: run
+# this on its own, don't bundle it into every hub/spoke change.
+#
+# NOTE: this is the piece both live/hub and live/spoke read via
+# terraform_remote_state - it must exist before either of those roots is
+# applied for the first time (see deploy-all.yml for full bring-up order).
+#
+# The actual terraform init/plan/apply steps live in the shared
+# terraform-apply.yml reusable workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to deploy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-network:
+    name: "network (${{ inputs.environment }})"
+    uses: ./.github/workflows/terraform-apply.yml
+    with:
+      working_directory: global/network
+      environment: ${{ inputs.environment }}
+      use_var_file: false
+      extra_tf_vars: "env_prefix=${{ inputs.environment }}"
+      aws_region: ap-northeast-1
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}

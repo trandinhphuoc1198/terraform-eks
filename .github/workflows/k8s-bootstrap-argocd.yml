@@ -1,0 +1,122 @@
+name: k8s-bootstrap-argocd
+
+# Hub only - installs Argo CD via SSM send-command (day-0, one-time
+# imperative step; everything after this is Argo CD syncing from Git).
+# Also seeds the aws-creds Secret ESO needs - the one piece that can't
+# come from ESO itself. Runs once per hub environment, idempotent via
+# helm upgrade --install / kubectl apply. Called by deploy-hub.yml.
+#
+# The actual send-command + poll loop for both SSM calls lives in the
+# shared .github/actions/ssm-run-script composite action.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      argocd_namespace:
+        type: string
+        default: "argocd"
+      argocd_chart_version:
+        type: string
+        default: ""
+      gitops_repo_raw_url:
+        type: string
+        required: true
+      env_name:
+        description: "Full env value, e.g. hub-dev - must match live/hub's var.env"
+        type: string
+        required: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap-argocd:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: live/hub
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.0"
+
+      - name: terraform init
+        run: terraform init -backend-config="envs/${{ inputs.environment }}/backend.hcl"
+
+      - name: Capture hub master instance id
+        id: instance
+        run: echo "id=$(terraform output -raw master_instance_id)" >> "$GITHUB_OUTPUT"
+
+      - name: Render Argo CD bootstrap script
+        run: |
+          sed \
+            -e "s|__ARGOCD_NAMESPACE__|${{ inputs.argocd_namespace }}|g" \
+            -e "s|__ARGOCD_CHART_VERSION__|${{ inputs.argocd_chart_version }}|g" \
+            -e "s|__GITOPS_REPO_RAW_URL__|${{ inputs.gitops_repo_raw_url }}|g" \
+            -e "s|__ENV__|${{ inputs.env_name }}|g" \
+            ../../.github/scripts/bootstrap-argocd.sh.tpl > /tmp/bootstrap-argocd.sh
+
+      - name: Install Argo CD via SSM
+        id: argocd
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/bootstrap-argocd.sh
+          timeout-seconds: "900"
+          max-poll-attempts: "90"
+          poll-interval-seconds: "10"
+
+      - name: Show output on failure
+        if: failure()
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.argocd.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}"
+
+      - name: Render ESO secret bootstrap script
+        run: |
+          sed \
+            -e "s|__AWS_REGION__|${{ inputs.aws_region }}|g" \
+            -e "s|__ENV__|${{ inputs.env_name }}|g" \
+            ../../.github/scripts/bootstrap-eso-secret.sh.tpl > /tmp/bootstrap-eso-secret.sh
+
+      # NOTE: this now actually checks the command's terminal status
+      # (fail-on-error defaults to "true"), unlike the previous
+      # `aws ssm wait command-executed` version, which returned success as
+      # soon as the command finished regardless of whether the script
+      # itself succeeded.
+      - name: Seed ESO aws-creds secret via SSM
+        id: eso_secret
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/bootstrap-eso-secret.sh
+          timeout-seconds: "300"
+          max-poll-attempts: "30"
+          poll-interval-seconds: "10"
+
+      - name: Show ESO secret output on failure
+        if: failure()
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.eso_secret.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}"

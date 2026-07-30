@@ -1,0 +1,133 @@
+name: k8s-cluster-bootstrap
+
+# Runs kubeadm init + CNI on a cluster's master via SSM send-command,
+# instead of user_data. This is what makes a bootstrap failure show up as
+# a failed CI job with logs, instead of hiding in cloud-init on a box
+# nobody's watching. Called by deploy-hub.yml / deploy-spoke.yml after the
+# corresponding `terraform apply`, before hub/argocd registration steps.
+#
+# The actual send-command + poll loop lives in the shared
+# .github/actions/ssm-run-script composite action.
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "live/hub, live/spoke, or any other spoke root (e.g. live/spoke-2)"
+        type: string
+        required: true
+      environment:
+        description: "envs/<environment> folder to read backend.hcl from"
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      install_cni_ccm:
+        description: "Must match the working root's install_cni_ccm - true for hub (node reaches Ready at bootstrap), false for spokes (Argo CD installs CNI/CCM later; verify apiserver health instead of node Ready)"
+        type: boolean
+        default: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.0"
+
+      - name: terraform init
+        run: terraform init -backend-config="envs/${{ inputs.environment }}/backend.hcl"
+
+      - name: Capture master instance id
+        id: instance
+        run: echo "id=$(terraform output -raw master_instance_id)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for SSM agent to register
+        run: |
+          INSTANCE_ID="${{ steps.instance.outputs.id }}"
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "None")
+            if [ "$STATUS" = "Online" ]; then
+              echo "SSM agent is registered and online."
+              exit 0
+            fi
+            echo "Waiting for SSM agent to register (attempt $i/30)..."
+            sleep 10
+          done
+          echo "::error::SSM agent did not register within the timeout window"
+          exit 1
+
+      - name: Render bootstrap script from terraform output
+        run: terraform output -raw master_userdata > /tmp/bootstrap.sh
+
+      - name: Run kubeadm init + CNI via SSM
+        id: bootstrap
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/bootstrap.sh
+          timeout-seconds: "900"
+          max-poll-attempts: "90"
+          poll-interval-seconds: "10"
+
+      - name: Show bootstrap output on failure
+        if: failure()
+        run: |
+          echo "=== STDOUT ==="
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.bootstrap.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "StandardOutputContent" --output text
+          echo "=== STDERR ==="
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.bootstrap.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "StandardErrorContent" --output text
+
+      - name: Verify master node is Ready
+        if: ${{ inputs.install_cni_ccm }}
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["KUBECONFIG=/home/ec2-user/.kube/config kubectl get nodes --no-headers"]' \
+            --query "Command.CommandId" --output text)
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" \
+            --query StandardOutputContent --output text | tee node_status.txt
+          grep -q " Ready" node_status.txt || (echo "::error::master node did not reach Ready" && exit 1)
+
+      - name: Verify apiserver is reachable (spoke - node stays NotReady until Argo CD installs CNI/CCM)
+        if: ${{ !inputs.install_cni_ccm }}
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["KUBECONFIG=/home/ec2-user/.kube/config kubectl get --raw=/readyz"]' \
+            --query "Command.CommandId" --output text)
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" \
+            --query StandardOutputContent --output text | tee apiserver_status.txt
+          grep -q "^ok$" apiserver_status.txt || (echo "::error::spoke apiserver did not report ready" && exit 1)

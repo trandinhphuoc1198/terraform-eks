@@ -1,0 +1,116 @@
+name: terraform-apply
+
+# Shared implementation of "terraform init -> plan[-destroy] -> apply",
+# used by every root (global/network, live/hub, live/spoke). Centralizes
+# the boilerplate that used to be copy-pasted across deploy-network.yml,
+# deploy-hub.yml, deploy-spoke-infra.yml, terraform-destroy-hub.yml,
+# terraform-destroy-spoke.yml, and destroy-network.yml.
+#
+# A handful of inputs cover every existing call site:
+#   - `destroy`      switches `terraform plan` to `terraform plan -destroy`.
+#   - `use_var_file` toggles whether `-var-file=envs/<environment>/terraform.tfvars`
+#                     is passed (global/network doesn't have one; live/hub
+#                     and live/spoke do).
+#   - `extra_tf_vars` is a raw string of additional `-var="key=value"` flags
+#                     for whatever a given root still needs on top of that
+#                     (env_prefix for network, network_state_key for hub/spoke).
+#   - `terraform_output_name`, if set, captures `terraform output -raw <name>`
+#                     after apply and exposes it as this workflow's own
+#                     `terraform_output_value` output (used by
+#                     deploy-spoke-infra.yml to grab `cluster_name`).
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Root directory to run terraform in, e.g. global/network, live/hub, live/spoke"
+        type: string
+        required: true
+      environment:
+        description: "envs/<environment> folder to read backend.hcl (and, if use_var_file, terraform.tfvars) from - also used as the GitHub Environment name for deployment protection rules/secrets"
+        type: string
+        required: true
+      destroy:
+        description: "If true, runs terraform plan -destroy + apply instead of a normal apply"
+        type: boolean
+        default: false
+      use_var_file:
+        description: "If true, passes -var-file=envs/<environment>/terraform.tfvars"
+        type: boolean
+        default: true
+      extra_tf_vars:
+        description: 'Extra raw -var="key=value" arguments to append to the plan command'
+        type: string
+        default: ""
+      terraform_output_name:
+        description: "If set, captures `terraform output -raw <name>` after apply and exposes it as terraform_output_value"
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        required: true
+      tf_version:
+        type: string
+        default: "1.9.0"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+    outputs:
+      terraform_output_value:
+        description: "Value of `terraform output -raw <terraform_output_name>`, if terraform_output_name was set"
+        value: ${{ jobs.terraform.outputs.terraform_output_value }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: "terraform ${{ inputs.destroy && 'destroy' || 'apply' }} (${{ inputs.working_directory }}, ${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    outputs:
+      terraform_output_value: ${{ steps.capture_output.outputs.value }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ inputs.tf_version }}
+
+      - name: terraform init
+        run: terraform init -backend-config="envs/${{ inputs.environment }}/backend.hcl"
+
+      - name: terraform plan
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_DESTROY_FLAG: ${{ inputs.destroy && '-destroy' || '' }}
+          TF_VAR_FILE_FLAG: ${{ inputs.use_var_file && format('-var-file=envs/{0}/terraform.tfvars', inputs.environment) || '' }}
+          TF_EXTRA_VARS: ${{ inputs.extra_tf_vars }}
+        run: |
+          args=()
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Strip leading -var= or quotes if present
+            clean_line=$(echo "$line" | sed -E 's/^-var=["'\'']?//; s/["'\'']?$//')
+            args+=(-var "$clean_line")
+          done <<< "$TF_EXTRA_VARS"
+
+          terraform plan -input=false $TF_DESTROY_FLAG $TF_VAR_FILE_FLAG "${args[@]}" -out=tfplan
+
+      - name: terraform apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Capture terraform output
+        id: capture_output
+        if: inputs.terraform_output_name != ''
+        run: echo "value=$(terraform output -raw ${{ inputs.terraform_output_name }})" >> "$GITHUB_OUTPUT"

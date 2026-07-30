@@ -1,0 +1,99 @@
+name: destroy-spoke
+
+# Tears down ONE spoke cluster's infra (default live/spoke). Does not touch
+# live/hub and does not touch global/network.
+#
+# Three phases, each its own reusable workflow, chained here for standalone
+# use - destroy-all.yml calls these same three workflows directly instead,
+# so it can interleave drain-spoke-pvcs.yml / terraform-destroy-spoke.yml
+# with drain-hub-pvcs.yml / terraform-destroy-hub.yml and run both
+# clusters' terraform destroy in parallel:
+#   1. deregister-from-argocd - fully removes the spoke from ArgoCD's
+#      inventory (see k8s-deregister-from-hub.yml) so nothing can recreate
+#      a workload while draining runs. Fails the whole job if it can't be
+#      confirmed - this is the piece that makes the rest of this pipeline
+#      race-free rather than best-effort.
+#   2. drain-spoke-pvcs - drains every remaining PersistentVolumeClaim so
+#      the aws-ebs-csi-driver issues DeleteVolume for every EBS volume
+#      Terraform never created. Runs risk-free now that ArgoCD can no
+#      longer resurrect anything. Best-effort - a stuck PVC logs a warning
+#      rather than blocking teardown.
+#   3. terraform-destroy-spoke - removes the Terraform-managed infra itself.
+#
+# NOTE: this only destroys the Terraform-managed infra and the ArgoCD
+# registration (phase 1). It does NOT remove the argocd-clusters/<name>
+# secret in AWS Secrets Manager - that's inert once the ArgoCD-side Secret
+# and git file are gone, but delete it too if you want to fully clean up.
+#
+# `spoke_dir` mirrors deploy-spoke.yml so this same workflow can tear down
+# any additional spoke (e.g. live/spoke-2) without new workflow jobs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to destroy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      spoke_dir:
+        description: "Path to the spoke root to tear down"
+        required: false
+        type: string
+        default: "live/spoke"
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      spoke_dir:
+        type: string
+        default: "live/spoke"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+      ARGOCD_REGISTRATION_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ── Phase 1: deregister from ArgoCD (race-free - see that workflow) ──────
+  deregister-from-argocd:
+    name: "deregister from hub argocd (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    uses: ./.github/workflows/k8s-deregister-from-hub.yml
+    with:
+      spoke_dir: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+      hub_env: hub-${{ inputs.environment }}
+      aws_region: ${{ vars.AWS_REGION }}
+    secrets:
+      ARGOCD_REGISTRATION_ROLE_ARN: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
+
+  # ── Phase 2: drain remaining PVCs (release CSI-backed EBS volumes) ───────
+  drain-spoke:
+    name: "drain spoke cluster (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    needs: deregister-from-argocd
+    uses: ./.github/workflows/drain-cluster.yml
+    with:
+      working_directory: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+      aws_region: ${{ vars.AWS_REGION }}
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+  # ── Phase 3: terraform destroy ────────────────────────────────────────────
+  terraform-destroy-spoke:
+    name: "terraform destroy spoke infra (${{ inputs.spoke_dir }}, ${{ inputs.environment }})"
+    needs: drain-spoke
+    uses: ./.github/workflows/terraform-destroy-spoke.yml
+    with:
+      spoke_dir: ${{ inputs.spoke_dir }}
+      environment: ${{ inputs.environment }}
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}

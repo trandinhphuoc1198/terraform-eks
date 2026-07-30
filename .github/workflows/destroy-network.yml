@@ -1,0 +1,56 @@
+name: destroy-network
+
+# Tears down the shared Transit Gateway (global/network).
+#
+# ⚠️ RUN THIS LAST. Both live/hub and live/spoke read this root's state via
+# terraform_remote_state (transit_gateway_id). If this is destroyed while
+# hub/spoke state still references it, their own `terraform destroy` (and
+# even `terraform plan`) will fail trying to resolve that data source.
+# Destroy live/spoke and live/hub first (destroy-spoke.yml / destroy-hub.yml,
+# or destroy-all.yml which sequences all three correctly).
+#
+# The actual terraform init/plan -destroy/apply steps live in the shared
+# terraform-apply.yml reusable workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which envs/<environment> folder to destroy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy-network:
+    name: "destroy network (${{ inputs.environment }})"
+    # Deployment protection rules (required reviewers, etc.) for dev/prod
+    # are applied inside terraform-apply.yml's own job, which does set
+    # environment: - GitHub doesn't support `environment:` on a job that
+    # just calls a reusable workflow (uses:), only on a real job with
+    # runs-on.
+    uses: ./.github/workflows/terraform-apply.yml
+    with:
+      working_directory: global/network
+      environment: ${{ inputs.environment }}
+      destroy: true
+      use_var_file: false
+      extra_tf_vars: "env_prefix=${{ inputs.environment }}"
+      aws_region: ap-northeast-1
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
