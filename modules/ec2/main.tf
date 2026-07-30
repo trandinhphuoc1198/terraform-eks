@@ -525,8 +525,6 @@ resource "aws_iam_role_policy" "worker_ebs" {
   })
 }
 
-data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 resource "aws_iam_role_policy" "worker_karpenter" {
