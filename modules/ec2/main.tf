@@ -543,6 +543,7 @@ resource "aws_iam_role_policy" "master_karpenter" {
           "ec2:DescribeCapacityReservations",
           "ec2:DescribeImages",
           "ec2:DescribeInstances",
+          "ec2:DescribeInstanceStatus",
           "ec2:DescribeInstanceTypes",
           "ec2:DescribeInstanceTypeOfferings",
           "ec2:DescribeLaunchTemplates",
