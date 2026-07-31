@@ -176,6 +176,51 @@ jobs:
             --instance-id "${{ steps.instance.outputs.id }}" \
             --query "StandardOutputContent" --output text || true
 
+      # ── Karpenter node drain ──────────────────────────────────────────
+      # Must run LAST - drain-loadbalancers.sh.tpl and drain-pvcs.sh.tpl
+      # above still need live worker nodes (CCM/CSI-driver pods) to release
+      # their AWS-side resources cleanly. Terminating Karpenter nodes first
+      # would break both of those.
+      #
+      # Karpenter-provisioned instances are NOT Terraform-managed (Karpenter
+      # calls ec2:RunInstances directly), so terraform destroy has no
+      # resource to reference them. Left undrained, they keep an ENI
+      # attached to the subnet/security groups modules/vpc tries to delete,
+      # which can make terraform destroy fail outright - not just leak cost.
+      - name: Render Karpenter node drain script
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        run: |
+          sed "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
+            ../../.github/scripts/drain-karpenter-nodes.sh.tpl > /tmp/drain-karpenter-nodes.sh
+
+      - name: Deprovision Karpenter-managed nodes
+        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        id: drain_karpenter
+        uses: ./.github/actions/ssm-run-script
+        with:
+          instance-id: ${{ steps.instance.outputs.id }}
+          script-path: /tmp/drain-karpenter-nodes.sh
+          timeout-seconds: "900"
+          max-poll-attempts: "95"
+          poll-interval-seconds: "10"
+          fail-on-error: "false"
+
+      - name: Warn if Karpenter node drain did not complete cleanly
+        if: steps.drain_karpenter.outputs.status != '' && steps.drain_karpenter.outputs.status != 'Success'
+        run: |
+          echo "::warning::Karpenter node drain command ended with status ${{ steps.drain_karpenter.outputs.status }} - some \
+          worker instances may still be running. terraform destroy may fail deleting the VPC/security groups \
+          if any ENI is still attached. Check the AWS Console (EC2) for instances tagged \
+          kubernetes.io/cluster/${{ steps.cluster.outputs.name }}=owned after this run."
+
+      - name: Show Karpenter node drain output
+        if: steps.drain_karpenter.outputs.cmd_id != ''
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.drain_karpenter.outputs.cmd_id }}" \
+            --instance-id "${{ steps.instance.outputs.id }}" \
+            --query "StandardOutputContent" --output text || true
+
       - name: Warn if load balancer drain did not complete cleanly
         if: steps.drain_lb.outputs.status != '' && steps.drain_lb.outputs.status != 'Success'
         run: |
