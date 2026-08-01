@@ -41,7 +41,7 @@ module "vpc" {
   private_subnet_cidrs       = var.private_subnet_cidrs
   region                     = var.region
   cluster_name               = var.cluster_name
-  enable_karpenter_discovery = false
+  enable_karpenter_discovery = true
 }
 
 # ── Baked k8s base AMI (built by Packer + Ansible - see /packer) ─────────────
@@ -89,7 +89,7 @@ module "ec2" {
   trusted_api_cidr_blocks     = [var.hub_vpc_cidr]
   register_with_hub           = true
   install_clustermesh_ca_pull = true
-  install_karpenter           = false
+  install_karpenter           = true
   pod_cidr_supernet           = var.pod_cidr_supernet
   vpc_cidr_supernet           = var.vpc_cidr_supernet
   clustermesh_nodeport        = var.clustermesh_nodeport

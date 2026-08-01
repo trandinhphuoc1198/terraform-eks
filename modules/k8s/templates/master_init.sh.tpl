@@ -106,7 +106,7 @@ if [ "$INSTALL_CNI_CCM" = "true" ]; then
 
   for i in $(seq 1 5); do
     helm upgrade --install cilium cilium/cilium \
-    --version "1.16.0" \
+    --version "1.20.0-rc.1" \
     --namespace kube-system \
     --create-namespace \
     --set operator.replicas=1 \

@@ -104,9 +104,9 @@ module "ec2" {
   cluster_name                = var.cluster_name
   ami_id                      = module.ami.ami_id
   s3_bucket_arns              = module.s3.bucket_arns
-  install_karpenter           = false
   install_eso                 = true
   install_clustermesh_ca_push = true
+  install_karpenter           = false
   pod_cidr_supernet           = var.pod_cidr_supernet
   vpc_cidr_supernet           = var.vpc_cidr_supernet
   clustermesh_nodeport        = var.clustermesh_nodeport
