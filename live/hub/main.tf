@@ -51,13 +51,14 @@ check "no_duplicate_cidrs" {
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
 module "vpc" {
-  source               = "../../modules/vpc"
-  env                  = var.env
-  vpc_cidr             = var.vpc_cidr
-  public_subnet_cidrs  = var.public_subnet_cidrs
-  private_subnet_cidrs = var.private_subnet_cidrs
-  region               = var.region
-  cluster_name         = var.cluster_name
+  source                     = "../../modules/vpc"
+  env                        = var.env
+  vpc_cidr                   = var.vpc_cidr
+  public_subnet_cidrs        = var.public_subnet_cidrs
+  private_subnet_cidrs       = var.private_subnet_cidrs
+  region                     = var.region
+  cluster_name               = var.cluster_name
+  enable_karpenter_discovery = false
 }
 
 # ── Baked k8s base AMI (built by Packer + Ansible - see /packer) ─────────────
@@ -103,6 +104,7 @@ module "ec2" {
   cluster_name                = var.cluster_name
   ami_id                      = module.ami.ami_id
   s3_bucket_arns              = module.s3.bucket_arns
+  install_karpenter           = false
   install_eso                 = true
   install_clustermesh_ca_push = true
   pod_cidr_supernet           = var.pod_cidr_supernet

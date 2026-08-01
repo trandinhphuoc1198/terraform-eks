@@ -9,3 +9,8 @@ variable "cluster_name" {
   type        = string
 }
 
+variable "enable_karpenter_discovery" {
+  description = "Tags private subnets with karpenter.sh/discovery=<cluster_name>. false on the hub, since it no longer runs Karpenter."
+  type        = bool
+  default     = true
+}

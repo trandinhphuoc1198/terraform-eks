@@ -39,6 +39,11 @@ on:
        description: If set, scales argocd-application-controller and argocd-applicationset-controller to 0 replicas on THIS cluster
        type: string
        default: ""
+       
+      has_karpenter:
+        description: "If true, runs the Karpenter node-deprovisioning step before terraform destroy"
+        type: boolean
+        default: true
     secrets:
       AWS_DEPLOY_ROLE_ARN:
         required: true
@@ -188,13 +193,13 @@ jobs:
       # attached to the subnet/security groups modules/vpc tries to delete,
       # which can make terraform destroy fail outright - not just leak cost.
       - name: Render Karpenter node drain script
-        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        if: inputs.has_karpenter && steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
         run: |
           sed "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
             ../../.github/scripts/drain-karpenter-nodes.sh.tpl > /tmp/drain-karpenter-nodes.sh
 
       - name: Deprovision Karpenter-managed nodes
-        if: steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
+        if: inputs.has_karpenter && steps.instance.outputs.id != '' && steps.ssm_check.outputs.online == 'true'
         id: drain_karpenter
         uses: ./.github/actions/ssm-run-script
         with:
@@ -206,7 +211,7 @@ jobs:
           fail-on-error: "false"
 
       - name: Warn if Karpenter node drain did not complete cleanly
-        if: steps.drain_karpenter.outputs.status != '' && steps.drain_karpenter.outputs.status != 'Success'
+        if: inputs.has_karpenter && steps.drain_karpenter.outputs.status != '' && steps.drain_karpenter.outputs.status != 'Success'
         run: |
           echo "::warning::Karpenter node drain command ended with status ${{ steps.drain_karpenter.outputs.status }} - some \
           worker instances may still be running. terraform destroy may fail deleting the VPC/security groups \
@@ -214,7 +219,7 @@ jobs:
           kubernetes.io/cluster/${{ steps.cluster.outputs.name }}=owned after this run."
 
       - name: Show Karpenter node drain output
-        if: steps.drain_karpenter.outputs.cmd_id != ''
+        if: inputs.has_karpenter && steps.drain_karpenter.outputs.cmd_id != ''
         run: |
           aws ssm get-command-invocation \
             --command-id "${{ steps.drain_karpenter.outputs.cmd_id }}" \

@@ -16,7 +16,7 @@ key_name             = "key"
 master_private_ip    = "10.1.11.10"
 
 worker_min         = 1
-worker_max         = 6
+worker_max         = 3
 worker_desired     = 1
 worker_volume_size = 20
 master_volume_size = 20

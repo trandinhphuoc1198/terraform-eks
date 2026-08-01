@@ -527,9 +527,10 @@ resource "aws_iam_role_policy" "worker_ebs" {
 
 data "aws_partition" "current" {}
 
-resource "aws_iam_role_policy" "master_karpenter" {
-  name = "${var.env}-k8s-master-karpenter-policy"
-  role = aws_iam_role.master.id
+resource "aws_iam_role_policy" "worker_karpenter" {
+  count = var.install_karpenter ? 1 : 0
+  name  = "${var.env}-k8s-worker-karpenter-policy"
+  role  = aws_iam_role.worker.id
 
   policy = jsonencode({
     Version = "2012-10-17"

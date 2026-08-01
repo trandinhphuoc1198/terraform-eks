@@ -85,3 +85,18 @@ variable "install_clustermesh_ca_pull" {
   type        = bool
   default     = false
 }
+
+variable "install_karpenter" {
+  description = <<-EOT
+    If true, grants the worker IAM role the EC2/IAM permissions Karpenter
+    needs to provision/terminate nodes itself. Set true on spokes -
+    Karpenter runs there to spawn the actual workload nodes, while the ASG
+    only carries platform pods (Karpenter itself, ebs-csi, cert-manager,
+    etc). Set false on the hub - the hub runs everything (including Argo
+    CD) directly on ASG-launched workers with no Karpenter, so there are
+    no Karpenter-provisioned nodes outside Terraform's state for
+    terraform destroy / drain-cluster.yml to ever have to worry about.
+  EOT
+  type        = bool
+  default     = true
+}

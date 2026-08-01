@@ -36,12 +36,14 @@ resource "aws_subnet" "private" {
   cidr_block        = var.private_subnet_cidrs[count.index]
   availability_zone = data.aws_availability_zones.available.names[count.index]
 
-  tags = {
-    Name                                        = "${var.env}-private-subnet-${count.index + 1}"
-    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
-    "kubernetes.io/role/internal-elb"           = "1"
-    "karpenter.sh/discovery"           = "${var.cluster_name}"
-  }
+  tags = merge(
+    {
+      Name                                        = "${var.env}-private-subnet-${count.index + 1}"
+      "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+      "kubernetes.io/role/internal-elb"           = "1"
+    },
+    var.enable_karpenter_discovery ? { "karpenter.sh/discovery" = var.cluster_name } : {}
+  )
 }
 
 # ── NAT Gateway (AWS managed, single AZ) ─────────────────────────────────
