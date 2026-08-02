@@ -154,7 +154,7 @@ resource "aws_vpc_security_group_egress_rule" "worker_egress_all" {
 # The SG must therefore admit traffic from the fleet's VPC-CIDR supernet,
 # not from a synthetic pod-CIDR supernet.
 resource "aws_vpc_security_group_ingress_rule" "worker_ingress_clustermesh_pods" {
-  description       = "Cross-cluster pod traffic (Cilium Cluster Mesh, native routing) — pods now carry real VPC IPs under ENI mode"
+  description       = "Cross-cluster pod traffic (Cilium Cluster Mesh, native routing) - pods now carry real VPC IPs under ENI mode"
   security_group_id = aws_security_group.worker.id
   cidr_ipv4         = var.vpc_cidr_supernet
   ip_protocol       = "-1"
@@ -365,7 +365,7 @@ resource "aws_iam_role_policy" "master_ccm_policy" {
 # cilium-operator (ipam.mode: eni, platform/values/base/cilium.yaml) calls
 # EC2 directly to create/attach ENIs and assign secondary IPs/prefixes to
 # nodes, using whichever node's instance-profile credentials its pod picks
-# up (default AWS SDK chain, no IRSA in this repo — same pattern as
+# up (default AWS SDK chain, no IRSA in this repo - same pattern as
 # Karpenter and the Cluster Mesh CA policies). Granted on both master and
 # worker roles since the operator (1 replica, no nodeSelector) could land
 # on either.
