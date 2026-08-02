@@ -138,7 +138,7 @@ resource "aws_iam_role" "argocd_registration_ci" {
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
-        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:trandinhphuoc1198/*:*" }
+        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:trandinhphuoc1198*/*:*" }
       }
     }]
   })
