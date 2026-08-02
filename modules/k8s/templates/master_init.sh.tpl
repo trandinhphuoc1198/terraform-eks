@@ -156,7 +156,7 @@ if [ "$INSTALL_CNI_CCM" = "true" ]; then
   helm repo update
   helm upgrade --install aws-cloud-controller-manager aws-cloud-controller-manager/aws-cloud-controller-manager \
     --namespace kube-system \
-    --set 'args={--v=2,--cloud-provider=aws}'
+    --set 'args={--v=2,--cloud-provider=aws,--configure-cloud-routes=false}'
 
   echo "=== Waiting for uninitialized taint to clear ===" >> /var/log/kubeadm-init.log
   timeout 120 bash -c 'until ! kubectl get nodes -o json | grep -q "node.cloudprovider.kubernetes.io/uninitialized"; do sleep 5; done'
