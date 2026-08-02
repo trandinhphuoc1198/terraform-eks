@@ -20,6 +20,12 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.2"
     }
+    # Used by modules/irsa to fetch the OIDC issuer's TLS certificate
+    # thumbprint for aws_iam_openid_connect_provider.
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 

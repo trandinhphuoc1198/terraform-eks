@@ -30,6 +30,20 @@ cat <<EOF > /tmp/kubeadm-config.yaml
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 kubernetesVersion: "${k8s_version}"
+%{ if oidc_issuer_url != "" }
+apiServer:
+  extraArgs:
+    # IRSA: this cluster's own OIDC issuer. kube-apiserver serves the real
+    # /.well-known/openid-configuration and /openid/v1/jwks locally with
+    # this issuer baked in - service-account-jwks-uri is deliberately left
+    # at its default (issuer + /openid/v1/jwks) so those two self-served
+    # documents are internally consistent. The "publish to S3" step below
+    # just mirrors that exact local content out to a public URL that
+    # equals this issuer, since the master itself has no public IP for
+    # AWS STS to reach directly.
+    #
+    service-account-issuer: "${oidc_issuer_url}"
+%{ endif }
 controllerManager:
   extraArgs:
     cloud-provider: "external"
@@ -84,6 +98,34 @@ for i in $(seq 1 30); do
   echo "apiserver not ready yet, retrying in 5s (attempt $i/30)..." >> /var/log/kubeadm-init.log
   sleep 5
 done
+
+# ── IRSA: publish OIDC discovery + JWKS for AWS STS federation ───────────
+# Deliberately does NOT hand-derive the JWKS (getting the "kid" to match
+# what kube-apiserver actually signs tokens with is easy to get subtly
+# wrong). Instead this fetches the exact, already-correct documents
+# kube-apiserver is self-serving on localhost:6443 - both endpoints are
+# unauthenticated/anonymous-accessible by design (that's how EKS's own
+# managed OIDC endpoint works too) - and mirrors them verbatim to the
+# public bucket at the same path structure the issuer URL implies. No
+# manual JWK/RSA math, no possibility of a kid mismatch.
+if [ -n "${oidc_issuer_url}" ]; then
+  echo "=== Publishing OIDC discovery documents to S3 for IRSA ===" >> /var/log/kubeadm-init.log
+  mkdir -p /tmp/oidc
+
+  kubectl get --raw /.well-known/openid-configuration > /tmp/oidc/openid-configuration
+  kubectl get --raw /openid/v1/jwks > /tmp/oidc/jwks.json
+
+  aws s3 cp /tmp/oidc/openid-configuration \
+    "s3://${oidc_s3_bucket}/${oidc_s3_prefix}/.well-known/openid-configuration" \
+    --content-type application/json --region "$AWS_REGION"
+  aws s3 cp /tmp/oidc/jwks.json \
+    "s3://${oidc_s3_bucket}/${oidc_s3_prefix}/openid/v1/jwks" \
+    --content-type application/json --region "$AWS_REGION"
+
+  echo "OIDC discovery published: ${oidc_issuer_url}/.well-known/openid-configuration" >> /var/log/kubeadm-init.log
+else
+  echo "=== Skipping OIDC discovery publish (oidc_issuer_url not set) ===" >> /var/log/kubeadm-init.log
+fi
 
 # ── CNI ─────────────────────────────────────────────────────────────────
 # Unconditional - every cluster (hub and spoke) needs pod networking to

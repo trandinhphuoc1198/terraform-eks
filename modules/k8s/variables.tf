@@ -19,3 +19,25 @@ variable "install_cni_ccm" {
   type        = bool
   default     = true
 }
+
+# ── IRSA / OIDC ────────────────────────────────────────────────────────────
+# Leave all three at their default ("") to skip IRSA entirely - the
+# bootstrap script no-ops the publish step and kube-apiserver starts with
+# no --service-account-issuer override (unchanged behavior).
+variable "oidc_issuer_url" {
+  description = "This cluster's IRSA OIDC issuer URL, e.g. https://irsa-oidc-dev-phuoctd6.s3.ap-northeast-1.amazonaws.com/hub-dev - must exactly match modules/irsa's oidc_issuer_url for the same cluster. Passed to kube-apiserver's --service-account-issuer."
+  type        = string
+  default     = ""
+}
+
+variable "oidc_s3_bucket" {
+  description = "Name of the shared IRSA OIDC bucket (modules/oidc-bucket's bucket_id) the master publishes its discovery doc + JWKS to at bootstrap"
+  type        = string
+  default     = ""
+}
+
+variable "oidc_s3_prefix" {
+  description = "This cluster's prefix inside the shared OIDC bucket, e.g. \"hub-dev\" - must match the path component of oidc_issuer_url"
+  type        = string
+  default     = ""
+}

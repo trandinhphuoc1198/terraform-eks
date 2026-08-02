@@ -18,6 +18,86 @@ check "no_cidr_overlap" {
   }
 }
 
+# ── IRSA / OIDC ─────────────────────────────────────────────────────────────
+# Mirrors live/hub/main.tf's block - see the comments there. This cluster's
+# issuer/prefix is entirely independent of the hub's; a spoke pod's token
+# can only ever validate against THIS provider, never the hub's.
+locals {
+  oidc_s3_prefix  = var.env
+  oidc_issuer_url = "https://${data.terraform_remote_state.network.outputs.oidc_bucket_regional_domain_name}/${local.oidc_s3_prefix}"
+
+  # EBS CSI pilot policy - straight copy of modules/ec2's worker_ebs
+  # statements, attached to a role trusted only for the aws-ebs-csi-driver
+  # controller ServiceAccount. See live/hub/main.tf's identical block for
+  # the full rationale and the modules/ec2 TODO this is meant to replace.
+  ebs_csi_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EBSReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeVolumes", "ec2:DescribeVolumeStatus",
+          "ec2:DescribeInstances", "ec2:DescribeSnapshots",
+          "ec2:DescribeAvailabilityZones"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "EBSCreateTaggedForThisCluster"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateVolume", "ec2:CreateSnapshot"]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "aws:RequestTag/ebs.csi.aws.com/cluster" = "true" }
+        }
+      },
+      {
+        Sid      = "EBSAttachDetachOnThisClustersInstances"
+        Effect   = "Allow"
+        Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
+        Resource = "arn:aws:ec2:*:*:instance/*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+        }
+      },
+      {
+        Sid      = "EBSAttachDetachOnTaggedVolumes"
+        Effect   = "Allow"
+        Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
+        Resource = "arn:aws:ec2:*:*:volume/*"
+        Condition = {
+          StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
+        }
+      },
+      {
+        Sid    = "EBSMutateVolumeOnlyResourcesTaggedForThisCluster"
+        Effect = "Allow"
+        Action = [
+          "ec2:DeleteVolume",
+          "ec2:DeleteSnapshot",
+          "ec2:ModifyVolume"
+        ]
+        Resource = "arn:aws:ec2:*:*:volume/*"
+        Condition = {
+          StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
+        }
+      },
+      {
+        Sid      = "EBSCreateTagsOnNewVolumesAndSnapshots"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateTags"]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "ec2:CreateAction" = ["CreateVolume", "CreateSnapshot"] }
+        }
+      }
+    ]
+  })
+}
+
 # ── VPC ───────────────────────────────────────────────────────────────────────
 module "vpc" {
   source                     = "../../modules/vpc"
@@ -46,6 +126,21 @@ module "tgw_attachment" {
   peer_cidr_blocks      = [var.hub_vpc_cidr]
 }
 
+# ── IRSA: register this cluster's OIDC issuer + the EBS CSI pilot role ──────
+module "irsa" {
+  source          = "../../modules/irsa"
+  cluster_prefix  = local.oidc_s3_prefix
+  oidc_issuer_url = local.oidc_issuer_url
+
+  roles = {
+    ebs-csi-controller = {
+      service_account = "ebs-csi-controller-sa"
+      namespace       = "kube-system"
+      policy_json     = local.ebs_csi_irsa_policy
+    }
+  }
+}
+
 # ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
 module "k8s" {
   source            = "../../modules/k8s"
@@ -53,6 +148,9 @@ module "k8s" {
   env               = var.env
   vpc_cidr_supernet = var.vpc_cidr_supernet
   install_cni_ccm   = false # Argo CD (hub) installs CNI/CCM after this spoke registers
+  oidc_issuer_url   = local.oidc_issuer_url
+  oidc_s3_bucket    = data.terraform_remote_state.network.outputs.oidc_bucket_id
+  oidc_s3_prefix    = local.oidc_s3_prefix
 }
 
 # ── EC2: master node + shared IAM/SG resources ────────────────────────────────
@@ -74,6 +172,8 @@ module "ec2" {
   install_karpenter           = true
   vpc_cidr_supernet           = var.vpc_cidr_supernet
   clustermesh_nodeport        = var.clustermesh_nodeport
+  oidc_bucket_arn             = data.terraform_remote_state.network.outputs.oidc_bucket_arn
+  oidc_s3_prefix              = local.oidc_s3_prefix
 }
 
 # ── ASG: worker node Auto Scaling Group ───────────────────────────────────────
@@ -95,4 +195,3 @@ module "asg" {
 
   depends_on = [module.vpc]
 }
-

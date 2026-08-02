@@ -94,3 +94,16 @@ variable "install_karpenter" {
   type        = bool
   default     = true
 }
+
+# ── IRSA / OIDC ────────────────────────────────────────────────────────────
+variable "oidc_bucket_arn" {
+  description = "ARN of the shared IRSA OIDC bucket (modules/oidc-bucket's bucket_arn). If set, grants the master role s3:PutObject scoped to this cluster's own prefix only, so master_init.sh.tpl can publish its OIDC discovery doc + JWKS. Leave \"\" (default) to skip IRSA entirely."
+  type        = string
+  default     = ""
+}
+
+variable "oidc_s3_prefix" {
+  description = "This cluster's prefix inside the shared OIDC bucket, e.g. \"hub-dev\" - scopes the master's s3:PutObject grant to only its own cluster's objects. Required if oidc_bucket_arn is set."
+  type        = string
+  default     = ""
+}

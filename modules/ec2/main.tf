@@ -265,6 +265,27 @@ resource "aws_iam_role_policy" "master_ssm_write" {
   })
 }
 
+# ── IRSA: master publishes its own OIDC discovery doc + JWKS ──────────────
+# Scoped to this cluster's own prefix in the shared bucket only - the hub
+# master can never write into a spoke's prefix or vice versa. See
+# modules/k8s/templates/master_init.sh.tpl's publish step and
+# modules/oidc-bucket/README.md for the full picture.
+resource "aws_iam_role_policy" "master_oidc_publish" {
+  count = var.oidc_bucket_arn != "" ? 1 : 0
+  name  = "${var.env}-k8s-master-oidc-publish-policy"
+  role  = aws_iam_role.master.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "PublishOwnClusterOIDCDocsOnly"
+      Effect   = "Allow"
+      Action   = ["s3:PutObject"]
+      Resource = "${var.oidc_bucket_arn}/${var.oidc_s3_prefix}/*"
+    }]
+  })
+}
+
 resource "aws_iam_role_policy" "master_ccm_policy" {
   name = "${var.env}-k8s-master-ccm-policy"
   role = aws_iam_role.master.id
@@ -369,6 +390,14 @@ resource "aws_iam_role_policy" "master_ccm_policy" {
 # Karpenter and the Cluster Mesh CA policies). Granted on both master and
 # worker roles since the operator (1 replica, no nodeSelector) could land
 # on either.
+#
+# TODO (IRSA rollout, phase 6): once modules/irsa's EBS CSI pilot (see
+# live/*/main.tf) is validated in both environments, this is the next
+# natural candidate to lift onto its own scoped IRSA role - cilium-operator
+# already runs as a single, well-identified Deployment/ServiceAccount, same
+# shape as EBS CSI's controller. Do not remove this block until the IRSA
+# equivalent is deployed and confirmed working (CloudTrail assumedRole
+# shows the IRSA role, not this node role).
 
 locals {
   cilium_eni_roles = {
@@ -479,6 +508,15 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 # (or untagged) will simply fail closed rather than silently being broad,
 # which is the safer failure mode but worth verifying against your actual
 # storage driver config.
+#
+# TODO (IRSA rollout, phase 5): this whole policy is the pilot target for
+# modules/irsa (see live/*/main.tf's "ebs-csi-controller" role). Once that
+# role is deployed and the aws-ebs-csi-driver ServiceAccount is annotated
+# to use it, verify in CloudTrail that PVC create/attach/delete calls show
+# up under the IRSA role's assumedRole, THEN remove this policy entirely -
+# every worker/node no longer needs blanket EBS permissions once the CSI
+# controller pod authenticates as itself instead of as "whichever node it
+# landed on". Do not remove before that verification.
 resource "aws_iam_role_policy" "worker_ebs" {
   name = "${var.env}-k8s-worker-ebs-policy"
   role = aws_iam_role.worker.id

@@ -32,3 +32,13 @@ output "master_userdata" {
   description = "Bootstrap script content for the master node (kubeadm init + CNI). Consumed by k8s-cluster-bootstrap.yml via SSM send-command - not applied automatically as EC2 user_data."
   value       = module.k8s.master_userdata
 }
+
+output "oidc_issuer_url" {
+  description = "This cluster's IRSA OIDC issuer - sanity-check against `kubectl get --raw /.well-known/openid-configuration | jq .issuer` on the master after bootstrap"
+  value       = local.oidc_issuer_url
+}
+
+output "irsa_role_arns" {
+  description = "Map of role_key -> IAM role ARN from modules/irsa. Annotate the matching ServiceAccount in the gitops repo with eks.amazonaws.com/role-arn = this value (e.g. irsa_role_arns[\"ebs-csi-controller\"] -> aws-ebs-csi-driver's ebs-csi-controller-sa)."
+  value       = module.irsa.role_arns
+}

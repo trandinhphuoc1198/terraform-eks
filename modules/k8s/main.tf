@@ -4,6 +4,9 @@ output "master_userdata" {
     env               = var.env
     vpc_cidr_supernet = var.vpc_cidr_supernet
     install_cni_ccm   = var.install_cni_ccm
+    oidc_issuer_url   = var.oidc_issuer_url
+    oidc_s3_bucket    = var.oidc_s3_bucket
+    oidc_s3_prefix    = var.oidc_s3_prefix
   })
 }
 
