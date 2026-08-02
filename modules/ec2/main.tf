@@ -30,7 +30,10 @@ resource "aws_security_group" "master" {
     ignore_changes = [ingress, egress]
   }
 
-  tags = { Name = "${var.env}-k8s-master-sg" }
+  tags = {
+    Name               = "${var.env}-k8s-master-sg"
+    "cilium.io/pod-sg" = "true"
+  }
 }
 
 # ── Security group: Worker ─────────────────────────────────────────────────────
@@ -47,6 +50,7 @@ resource "aws_security_group" "worker" {
   tags = {
     Name                                        = "${var.env}-k8s-worker-sg"
     "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+    "cilium.io/pod-sg"                          = "true"
   }
 }
 
@@ -146,16 +150,13 @@ resource "aws_vpc_security_group_egress_rule" "worker_egress_all" {
 }
 
 # ── Cluster Mesh: pod-to-pod traffic from any other cluster in the fleet ─────
-# Native-routing pod traffic terminates at the destination node's ENI (that's
-# what the TGW pod-CIDR-supernet route in modules/tgw-attachment points it
-# at), so the SG must explicitly allow it in. CIDR-based, not SG-referenced -
-# the peer's SG lives in a different VPC/account and can't be referenced
-# directly. Scoped to the fleet supernet, not per-peer, so adding a spoke
-# never requires touching this rule.
+# Under ENI IPAM, pods carry real VPC IPs rather than a separate pod-CIDR.
+# The SG must therefore admit traffic from the fleet's VPC-CIDR supernet,
+# not from a synthetic pod-CIDR supernet.
 resource "aws_vpc_security_group_ingress_rule" "worker_ingress_clustermesh_pods" {
-  description       = "Cross-cluster pod traffic (Cilium Cluster Mesh, native routing)"
+  description       = "Cross-cluster pod traffic (Cilium Cluster Mesh, native routing) — pods now carry real VPC IPs under ENI mode"
   security_group_id = aws_security_group.worker.id
-  cidr_ipv4         = var.pod_cidr_supernet
+  cidr_ipv4         = var.vpc_cidr_supernet
   ip_protocol       = "-1"
 
   tags = { Name = "${var.env}-worker-ingress-clustermesh-pods" }
@@ -164,7 +165,7 @@ resource "aws_vpc_security_group_ingress_rule" "worker_ingress_clustermesh_pods"
 resource "aws_vpc_security_group_ingress_rule" "master_ingress_clustermesh_pods" {
   description       = "Cross-cluster pod traffic (Cilium Cluster Mesh, native routing), master runs pods too (not cordoned)"
   security_group_id = aws_security_group.master.id
-  cidr_ipv4         = var.pod_cidr_supernet
+  cidr_ipv4         = var.vpc_cidr_supernet
   ip_protocol       = "-1"
 
   tags = { Name = "${var.env}-master-ingress-clustermesh-pods" }
@@ -315,26 +316,6 @@ resource "aws_iam_role_policy" "master_ccm_policy" {
         }
       },
       {
-        # Native routing (Cilium routingMode: native) needs the route
-        # controller (--configure-cloud-routes=true, aws-ccm.yaml) to be
-        # able to write per-node pod-CIDR routes into the VPC route table
-        # modules/vpc tags with kubernetes.io/cluster/${var.cluster_name}.
-        # DescribeRouteTables is already covered by ReadOnlyDescribe above.
-        Sid    = "ManageRoutesInThisClustersRouteTable"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateRoute",
-          "ec2:DeleteRoute",
-          "ec2:ReplaceRoute"
-        ]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
-          }
-        }
-      },
-      {
         # ELB resource-level/tag-conditioned IAM isn't consistently supported
         # across Classic ELB vs ALB/NLB APIs, so unlike the EC2 statements
         # above this stays Resource = "*" - matches AWS's own documented
@@ -376,6 +357,73 @@ resource "aws_iam_role_policy" "master_ccm_policy" {
           "ec2:DescribeVpcs"
         ]
         Resource = "*"
+      }
+    ]
+  })
+}
+# ── Cilium ENI-mode IPAM ──────────────────────────────────────────────────
+# cilium-operator (ipam.mode: eni, platform/values/base/cilium.yaml) calls
+# EC2 directly to create/attach ENIs and assign secondary IPs/prefixes to
+# nodes, using whichever node's instance-profile credentials its pod picks
+# up (default AWS SDK chain, no IRSA in this repo — same pattern as
+# Karpenter and the Cluster Mesh CA policies). Granted on both master and
+# worker roles since the operator (1 replica, no nodeSelector) could land
+# on either.
+
+locals {
+  cilium_eni_roles = {
+    master = aws_iam_role.master.id
+    worker = aws_iam_role.worker.id
+  }
+}
+
+resource "aws_iam_role_policy" "cilium_eni" {
+  for_each = local.cilium_eni_roles
+  name     = "${var.env}-k8s-${each.key}-cilium-eni-policy"
+  role     = each.value
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "CiliumENIReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeVpcPeeringConnections",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeTags"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CiliumENILifecycle"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:AttachNetworkInterface",
+          "ec2:DetachNetworkInterface",
+          "ec2:DeleteNetworkInterface",
+          "ec2:ModifyNetworkInterfaceAttribute",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses",
+          "ec2:AssignIpv6Addresses",
+          "ec2:UnassignIpv6Addresses"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "CiliumENICreateTagsOnNewInterfaces"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateTags"]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:*:*:network-interface/*"
+        Condition = {
+          StringEquals = { "ec2:CreateAction" = "CreateNetworkInterface" }
+        }
       }
     ]
   })

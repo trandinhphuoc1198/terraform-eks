@@ -1,9 +1,8 @@
 output "master_userdata" {
   value = templatefile("${path.module}/templates/master_init.sh.tpl", {
     k8s_version       = var.k8s_version
-    pod_cidr          = var.pod_cidr
-    pod_cidr_supernet = var.pod_cidr_supernet
     env               = var.env
+    vpc_cidr_supernet = var.vpc_cidr_supernet
     install_cni_ccm   = var.install_cni_ccm
   })
 }

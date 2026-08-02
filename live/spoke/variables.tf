@@ -108,19 +108,6 @@ variable "k8s_version" {
   default     = "1.29"
 }
 
-variable "pod_cidr" {
-  description = "Pod network CIDR passed to kubeadm --pod-network-cidr"
-  type        = string
-  default     = "192.168.0.0/16"
-}
-
-
-variable "pod_cidr_supernet" {
-  description = "Fleet-wide pod-CIDR supernet - var.pod_cidr must fall inside this range for Cilium Cluster Mesh routing to work (see README)"
-  type        = string
-  default     = "100.64.0.0/10"
-}
-
 variable "vpc_cidr_supernet" {
   description = "Fleet-wide VPC-CIDR supernet - lets the clustermesh-apiserver NodePort SG rule admit traffic from any cluster without per-peer rules"
   type        = string

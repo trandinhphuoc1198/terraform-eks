@@ -8,20 +8,6 @@ locals {
   }
 }
 
-locals {
-  pod_start      = sum([for i, o in split(".", cidrhost(var.pod_cidr, 0)) : tonumber(o) * pow(256, 3 - i)])
-  pod_end        = local.pod_start + pow(2, 32 - tonumber(split("/", var.pod_cidr)[1])) - 1
-  supernet_start = sum([for i, o in split(".", cidrhost(var.pod_cidr_supernet, 0)) : tonumber(o) * pow(256, 3 - i)])
-  supernet_end   = local.supernet_start + pow(2, 32 - tonumber(split("/", var.pod_cidr_supernet)[1])) - 1
-}
-
-check "pod_cidr_within_fleet_supernet" {
-  assert {
-    condition     = local.pod_start >= local.supernet_start && local.pod_end <= local.supernet_end
-    error_message = "pod_cidr (${var.pod_cidr}) must fall within pod_cidr_supernet (${var.pod_cidr_supernet}) for Cilium Cluster Mesh routing to work."
-  }
-}
-
 check "no_cidr_overlap" {
   assert {
     condition = !(
@@ -51,25 +37,21 @@ module "ami" {
 
 # ── Transit Gateway attachment - connects this VPC to the hub VPC ────────────
 module "tgw_attachment" {
-  source                     = "../../modules/tgw-attachment"
-  env                        = var.env
-  transit_gateway_id         = data.terraform_remote_state.network.outputs.transit_gateway_id
-  vpc_id                     = module.vpc.vpc_id
-  attachment_subnet_ids      = module.vpc.private_subnet_ids
-  route_table_ids            = [module.vpc.private_route_table_id, module.vpc.public_route_table_id]
-  peer_cidr_blocks           = [var.hub_vpc_cidr]
-  own_pod_cidr               = var.pod_cidr
-  pod_cidr_supernet          = var.pod_cidr_supernet
-  tgw_default_route_table_id = data.terraform_remote_state.network.outputs.transit_gateway_default_route_table_id
+  source                = "../../modules/tgw-attachment"
+  env                   = var.env
+  transit_gateway_id    = data.terraform_remote_state.network.outputs.transit_gateway_id
+  vpc_id                = module.vpc.vpc_id
+  attachment_subnet_ids = module.vpc.private_subnet_ids
+  route_table_ids       = [module.vpc.private_route_table_id, module.vpc.public_route_table_id]
+  peer_cidr_blocks      = [var.hub_vpc_cidr]
 }
 
 # ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
 module "k8s" {
   source            = "../../modules/k8s"
   k8s_version       = var.k8s_version
-  pod_cidr          = var.pod_cidr
   env               = var.env
-  pod_cidr_supernet = var.pod_cidr_supernet
+  vpc_cidr_supernet = var.vpc_cidr_supernet
   install_cni_ccm   = false # Argo CD (hub) installs CNI/CCM after this spoke registers
 }
 
@@ -90,7 +72,6 @@ module "ec2" {
   register_with_hub           = true
   install_clustermesh_ca_pull = true
   install_karpenter           = true
-  pod_cidr_supernet           = var.pod_cidr_supernet
   vpc_cidr_supernet           = var.vpc_cidr_supernet
   clustermesh_nodeport        = var.clustermesh_nodeport
 }

@@ -41,8 +41,6 @@ etcd:
   local:
     extraArgs:
       listen-metrics-urls: "http://127.0.0.1:2381,http://$PRIVATE_IP:2381"
-networking:
-  podSubnet: "${pod_cidr}"
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -114,10 +112,11 @@ if [ "$INSTALL_CNI_CCM" = "true" ]; then
     --set k8sServiceHost="$PRIVATE_IP" \
     --set k8sServicePort="6443" \
     --set routingMode=native \
-    --set ipv4NativeRoutingCIDR="${pod_cidr_supernet}" \
+    --set ipv4NativeRoutingCIDR="${vpc_cidr_supernet}" \
     --set autoDirectNodeRoutes=false \
-    --set ipam.mode=kubernetes \
-    --set ipam.operator.clusterPoolIPv4PodCIDRList="${pod_cidr}" \
+    --set ipam.mode=eni \
+    --set eni.enabled=true \
+    --set eni.awsEnablePrefixDelegation=true \
     --set nodePort.enabled=true \
     --set nodePort.range="30000\,32767" \
     --set bpf.masquerade=true \
@@ -149,20 +148,15 @@ fi
 # Argo CD Application (Argo CD's chart ships no toleration for this taint;
 # CNI's DaemonSet does, which is why CNI is safe to apply before this step).
 #
-# --configure-cloud-routes=true (was false): with Cilium routingMode=native
-# above, this is what actually makes cross-AZ pod traffic routable - CCM's
-# route controller watches node.spec.podCIDR and syncs the matching route
-# into the VPC route table modules/vpc tags with
-# kubernetes.io/cluster/<cluster_name> (master's IAM role
-# - master_ccm_policy in modules/ec2/main.tf - is scoped to that same tag).
-# --cluster-cidr is required for the route controller to start.
+# Under ENI IPAM, pods carry real VPC IPs; no per-node podCIDR route
+# sync is needed in the VPC route table.
 if [ "$INSTALL_CNI_CCM" = "true" ]; then
   echo "=== Installing AWS CCM ===" >> /var/log/kubeadm-init.log
   helm repo add aws-cloud-controller-manager https://kubernetes.github.io/cloud-provider-aws
   helm repo update
   helm upgrade --install aws-cloud-controller-manager aws-cloud-controller-manager/aws-cloud-controller-manager \
     --namespace kube-system \
-    --set 'args={--v=2,--cloud-provider=aws,--configure-cloud-routes=true,--cluster-cidr=${pod_cidr}}'
+    --set 'args={--v=2,--cloud-provider=aws}'
 
   echo "=== Waiting for uninitialized taint to clear ===" >> /var/log/kubeadm-init.log
   timeout 120 bash -c 'until ! kubectl get nodes -o json | grep -q "node.cloudprovider.kubernetes.io/uninitialized"; do sleep 5; done'
