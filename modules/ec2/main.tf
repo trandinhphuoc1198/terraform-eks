@@ -396,6 +396,7 @@ resource "aws_iam_role_policy" "cilium_eni" {
           "ec2:DescribeInstances",
           "ec2:DescribeInstanceTypes",
           "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeRouteTables",
           "ec2:DescribeTags"
         ]
         Resource = "*"
