@@ -517,100 +517,100 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 # every worker/node no longer needs blanket EBS permissions once the CSI
 # controller pod authenticates as itself instead of as "whichever node it
 # landed on". Do not remove before that verification.
-resource "aws_iam_role_policy" "worker_ebs" {
-  name = "${var.env}-k8s-worker-ebs-policy"
-  role = aws_iam_role.worker.id
+# resource "aws_iam_role_policy" "worker_ebs" {
+#   name = "${var.env}-k8s-worker-ebs-policy"
+#   role = aws_iam_role.worker.id
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat(
-      [
-        {
-          Sid    = "EBSReadOnlyDescribe"
-          Effect = "Allow"
-          Action = [
-            "ec2:DescribeVolumes", "ec2:DescribeVolumeStatus",
-            "ec2:DescribeInstances", "ec2:DescribeSnapshots",
-            "ec2:DescribeAvailabilityZones"
-          ]
-          Resource = "*"
-        },
-        {
-          Sid      = "EBSCreateTaggedForThisCluster"
-          Effect   = "Allow"
-          Action   = ["ec2:CreateVolume", "ec2:CreateSnapshot"]
-          Resource = "*"
-          Condition = {
-            StringEquals = { "aws:RequestTag/ebs.csi.aws.com/cluster" = "true" }
-          }
-        },
-        # NEW - Attach/Detach need permission on the INSTANCE side too,
-        # and instances aren't tagged with ebs.csi.aws.com/cluster, so this
-        # can't carry that condition. Scope it to this cluster's own
-        # instances via the tag the ASG *does* apply instead.
-        {
-          Sid      = "EBSAttachDetachOnThisClustersInstances"
-          Effect   = "Allow"
-          Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
-          Resource = "arn:aws:ec2:*:*:instance/*"
-          Condition = {
-            StringEquals = {
-              "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
-            }
-          }
-        },
-        {
-          Sid      = "EBSAttachDetachOnTaggedVolumes"
-          Effect   = "Allow"
-          Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
-          Resource = "arn:aws:ec2:*:*:volume/*"
-          Condition = {
-            StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
-          }
-        },
-        {
-          Sid    = "EBSMutateVolumeOnlyResourcesTaggedForThisCluster"
-          Effect = "Allow"
-          Action = [
-            "ec2:DeleteVolume",
-            "ec2:DeleteSnapshot",
-            "ec2:ModifyVolume"
-          ]
-          Resource = "arn:aws:ec2:*:*:volume/*"
-          Condition = {
-            StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
-          }
-        },
-        {
-          Sid      = "EBSCreateTagsOnNewVolumesAndSnapshots"
-          Effect   = "Allow"
-          Action   = ["ec2:CreateTags"]
-          Resource = "*"
-          Condition = {
-            StringEquals = { "ec2:CreateAction" = ["CreateVolume", "CreateSnapshot"] }
-          }
-        },
-        {
-          Sid      = "SSMReadToken"
-          Effect   = "Allow"
-          Action   = ["ssm:GetParameter"]
-          Resource = aws_ssm_parameter.cluster_join_token.arn
-        }
-      ],
-      length(var.s3_bucket_arns) > 0 ? [
-        {
-          Sid    = "S3Access"
-          Effect = "Allow"
-          Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-          Resource = flatten([
-            var.s3_bucket_arns,
-            [for arn in var.s3_bucket_arns : "${arn}/*"]
-          ])
-        }
-      ] : []
-    )
-  })
-}
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = concat(
+#       [
+#         {
+#           Sid    = "EBSReadOnlyDescribe"
+#           Effect = "Allow"
+#           Action = [
+#             "ec2:DescribeVolumes", "ec2:DescribeVolumeStatus",
+#             "ec2:DescribeInstances", "ec2:DescribeSnapshots",
+#             "ec2:DescribeAvailabilityZones"
+#           ]
+#           Resource = "*"
+#         },
+#         {
+#           Sid      = "EBSCreateTaggedForThisCluster"
+#           Effect   = "Allow"
+#           Action   = ["ec2:CreateVolume", "ec2:CreateSnapshot"]
+#           Resource = "*"
+#           Condition = {
+#             StringEquals = { "aws:RequestTag/ebs.csi.aws.com/cluster" = "true" }
+#           }
+#         },
+#         # NEW - Attach/Detach need permission on the INSTANCE side too,
+#         # and instances aren't tagged with ebs.csi.aws.com/cluster, so this
+#         # can't carry that condition. Scope it to this cluster's own
+#         # instances via the tag the ASG *does* apply instead.
+#         {
+#           Sid      = "EBSAttachDetachOnThisClustersInstances"
+#           Effect   = "Allow"
+#           Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
+#           Resource = "arn:aws:ec2:*:*:instance/*"
+#           Condition = {
+#             StringEquals = {
+#               "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+#             }
+#           }
+#         },
+#         {
+#           Sid      = "EBSAttachDetachOnTaggedVolumes"
+#           Effect   = "Allow"
+#           Action   = ["ec2:AttachVolume", "ec2:DetachVolume"]
+#           Resource = "arn:aws:ec2:*:*:volume/*"
+#           Condition = {
+#             StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
+#           }
+#         },
+#         {
+#           Sid    = "EBSMutateVolumeOnlyResourcesTaggedForThisCluster"
+#           Effect = "Allow"
+#           Action = [
+#             "ec2:DeleteVolume",
+#             "ec2:DeleteSnapshot",
+#             "ec2:ModifyVolume"
+#           ]
+#           Resource = "arn:aws:ec2:*:*:volume/*"
+#           Condition = {
+#             StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
+#           }
+#         },
+#         {
+#           Sid      = "EBSCreateTagsOnNewVolumesAndSnapshots"
+#           Effect   = "Allow"
+#           Action   = ["ec2:CreateTags"]
+#           Resource = "*"
+#           Condition = {
+#             StringEquals = { "ec2:CreateAction" = ["CreateVolume", "CreateSnapshot"] }
+#           }
+#         },
+#         {
+#           Sid      = "SSMReadToken"
+#           Effect   = "Allow"
+#           Action   = ["ssm:GetParameter"]
+#           Resource = aws_ssm_parameter.cluster_join_token.arn
+#         }
+#       ],
+#       length(var.s3_bucket_arns) > 0 ? [
+#         {
+#           Sid    = "S3Access"
+#           Effect = "Allow"
+#           Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+#           Resource = flatten([
+#             var.s3_bucket_arns,
+#             [for arn in var.s3_bucket_arns : "${arn}/*"]
+#           ])
+#         }
+#       ] : []
+#     )
+#   })
+# }
 
 data "aws_partition" "current" {}
 
