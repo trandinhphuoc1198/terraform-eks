@@ -510,8 +510,9 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 # storage driver config.
 #
 resource "aws_iam_role_policy" "worker_tempo_loki" {
-  name = "${var.env}-k8s-worker-tempo_loki-policy"
-  role = aws_iam_role.worker.id
+  count = length(var.s3_bucket_arns) > 0 ? 1 : 0
+  name  = "${var.env}-k8s-worker-tempo_loki-policy"
+  role  = aws_iam_role.worker.id
 
   policy = jsonencode({
     Version = "2012-10-17"
