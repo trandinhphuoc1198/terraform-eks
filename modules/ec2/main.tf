@@ -512,19 +512,29 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 resource "aws_iam_role_policy" "worker_tempo_loki" {
   name = "${var.env}-k8s-worker-tempo_loki-policy"
   role = aws_iam_role.worker.id
-  policy = jsonencode(
-    length(var.s3_bucket_arns) > 0 ? [
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = length(var.s3_bucket_arns) > 0 ? [
       {
         Sid    = "S3Access"
         Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+
         Resource = flatten([
           var.s3_bucket_arns,
           [for arn in var.s3_bucket_arns : "${arn}/*"]
         ])
       }
     ] : []
-  )
+  })
 }
 
 data "aws_partition" "current" {}
