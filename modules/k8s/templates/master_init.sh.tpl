@@ -33,16 +33,8 @@ kubernetesVersion: "${k8s_version}"
 %{ if oidc_issuer_url != "" }
 apiServer:
   extraArgs:
-    # IRSA: this cluster's own OIDC issuer. kube-apiserver serves the real
-    # /.well-known/openid-configuration and /openid/v1/jwks locally with
-    # this issuer baked in - service-account-jwks-uri is deliberately left
-    # at its default (issuer + /openid/v1/jwks) so those two self-served
-    # documents are internally consistent. The "publish to S3" step below
-    # just mirrors that exact local content out to a public URL that
-    # equals this issuer, since the master itself has no public IP for
-    # AWS STS to reach directly.
-    #
     service-account-issuer: "${oidc_issuer_url}"
+    service-account-jwks-uri: "${oidc_issuer_url}/openid/v1/jwks"
 %{ endif }
 controllerManager:
   extraArgs:
