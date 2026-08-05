@@ -229,12 +229,12 @@ module "irsa" {
     }
     loki = {
       service_account = "loki"
-      namespace       = "monitoring"
+      namespace       = "observability"
       policy_json     = local.loki_irsa_policy
     }
     tempo = {
       service_account = "tempo"
-      namespace       = "monitoring"
+      namespace       = "observability"
       policy_json     = local.tempo_irsa_policy
     }
   }
