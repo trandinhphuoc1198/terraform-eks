@@ -201,8 +201,6 @@ module "asg" {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 # ── IRSA: External Secrets Operator (clustermesh CA pull only) ──────────────
 # Replaces install_clustermesh_ca_pull's node instance-profile grant
 # (modules/ec2, now removed) that platform/clustermesh/spoke/
