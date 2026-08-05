@@ -44,11 +44,6 @@ variable "register_with_hub" {
   default     = false
 }
 
-variable "install_eso" {
-  description = "If true, provisions the IAM identity External Secrets Operator uses to read every spoke's registration secret, plus SSM access for the CI registration workflow. Set true only on the hub."
-  type        = bool
-  default     = false
-}
 
 variable "master_volume_size" {
   description = "EBS volume size (in GB) for the master node root block device"
@@ -66,18 +61,6 @@ variable "clustermesh_nodeport" {
   description = "NodePort the clustermesh-apiserver Service listens on - exposed to every other cluster in the fleet for Cilium Cluster Mesh"
   type        = number
   default     = 32379
-}
-
-variable "install_clustermesh_ca_push" {
-  description = "If true, grants master + worker node roles secretsmanager write access (CreateSecret/PutSecretValue/DescribeSecret/TagResource) scoped to clustermesh/* - needed for platform/clustermesh/hub/ca-pushsecret.yaml to push the CA to Secrets Manager via ESO PushSecret. Hub only; every spoke's ExternalSecret only needs read, already covered elsewhere."
-  type        = bool
-  default     = false
-}
-
-variable "install_clustermesh_ca_pull" {
-  description = "If true, grants master + worker node roles secretsmanager:GetSecretValue and DescribeSecret, scoped to clustermesh/*. Needed for platform/clustermesh/spoke/external-secret.yaml to pull the CA hub/ca-pushsecret.yaml pushed to Secrets Manager. Spoke only - read-only, mirrors hub's install_clustermesh_ca_push but without any write actions."
-  type        = bool
-  default     = false
 }
 
 variable "install_karpenter" {

@@ -2,9 +2,6 @@ name: k8s-bootstrap-argocd
 
 # Hub only - installs Argo CD via SSM send-command (day-0, one-time
 # imperative step; everything after this is Argo CD syncing from Git).
-# Also seeds the aws-creds Secret ESO needs - the one piece that can't
-# come from ESO itself. Runs once per hub environment, idempotent via
-# helm upgrade --install / kubectl apply. Called by deploy-hub.yml.
 #
 # The actual send-command + poll loop for both SSM calls lives in the
 # shared .github/actions/ssm-run-script composite action.
@@ -91,32 +88,3 @@ jobs:
             --instance-id "${{ steps.instance.outputs.id }}" \
             --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}"
 
-      - name: Render ESO secret bootstrap script
-        run: |
-          sed \
-            -e "s|__AWS_REGION__|${{ inputs.aws_region }}|g" \
-            -e "s|__ENV__|${{ inputs.env_name }}|g" \
-            ../../.github/scripts/bootstrap-eso-secret.sh.tpl > /tmp/bootstrap-eso-secret.sh
-
-      # NOTE: this now actually checks the command's terminal status
-      # (fail-on-error defaults to "true"), unlike the previous
-      # `aws ssm wait command-executed` version, which returned success as
-      # soon as the command finished regardless of whether the script
-      # itself succeeded.
-      - name: Seed ESO aws-creds secret via SSM
-        id: eso_secret
-        uses: ./.github/actions/ssm-run-script
-        with:
-          instance-id: ${{ steps.instance.outputs.id }}
-          script-path: /tmp/bootstrap-eso-secret.sh
-          timeout-seconds: "300"
-          max-poll-attempts: "30"
-          poll-interval-seconds: "10"
-
-      - name: Show ESO secret output on failure
-        if: failure()
-        run: |
-          aws ssm get-command-invocation \
-            --command-id "${{ steps.eso_secret.outputs.cmd_id }}" \
-            --instance-id "${{ steps.instance.outputs.id }}" \
-            --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}"

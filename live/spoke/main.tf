@@ -138,6 +138,11 @@ module "irsa" {
       namespace       = "kube-system"
       policy_json     = local.ebs_csi_irsa_policy
     }
+    external-secrets = {
+      service_account = "external-secrets"
+      namespace       = "external-secrets"
+      policy_json     = local.eso_irsa_policy_spoke
+    }
   }
 }
 
@@ -155,25 +160,24 @@ module "k8s" {
 
 # ── EC2: master node + shared IAM/SG resources ────────────────────────────────
 module "ec2" {
-  source                      = "../../modules/ec2"
-  env                         = var.env
-  vpc_id                      = module.vpc.vpc_id
-  vpc_cidr                    = var.vpc_cidr
-  private_subnet_ids          = module.vpc.private_subnet_ids
-  master_instance_type        = var.master_instance_type
-  key_name                    = var.key_name
-  master_private_ip           = var.master_private_ip
-  master_volume_size          = var.master_volume_size
-  cluster_name                = var.cluster_name
-  ami_id                      = module.ami.ami_id
-  trusted_api_cidr_blocks     = [var.hub_vpc_cidr]
-  register_with_hub           = true
-  install_clustermesh_ca_pull = true
-  install_karpenter           = true
-  vpc_cidr_supernet           = var.vpc_cidr_supernet
-  clustermesh_nodeport        = var.clustermesh_nodeport
-  oidc_bucket_arn             = data.terraform_remote_state.network.outputs.oidc_bucket_arn
-  oidc_s3_prefix              = local.oidc_s3_prefix
+  source                  = "../../modules/ec2"
+  env                     = var.env
+  vpc_id                  = module.vpc.vpc_id
+  vpc_cidr                = var.vpc_cidr
+  private_subnet_ids      = module.vpc.private_subnet_ids
+  master_instance_type    = var.master_instance_type
+  key_name                = var.key_name
+  master_private_ip       = var.master_private_ip
+  master_volume_size      = var.master_volume_size
+  cluster_name            = var.cluster_name
+  ami_id                  = module.ami.ami_id
+  trusted_api_cidr_blocks = [var.hub_vpc_cidr]
+  register_with_hub       = true
+  install_karpenter       = true
+  vpc_cidr_supernet       = var.vpc_cidr_supernet
+  clustermesh_nodeport    = var.clustermesh_nodeport
+  oidc_bucket_arn         = data.terraform_remote_state.network.outputs.oidc_bucket_arn
+  oidc_s3_prefix          = local.oidc_s3_prefix
 }
 
 # ── ASG: worker node Auto Scaling Group ───────────────────────────────────────
@@ -194,4 +198,26 @@ module "asg" {
   ami_id                           = module.ami.ami_id
 
   depends_on = [module.vpc]
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# ── IRSA: External Secrets Operator (clustermesh CA pull only) ──────────────
+# Replaces install_clustermesh_ca_pull's node instance-profile grant
+# (modules/ec2, now removed) that platform/clustermesh/spoke/
+# external-secret.yaml relied on implicitly.
+locals {
+  eso_irsa_policy_spoke = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "PullClustermeshCA"
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ]
+      Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:clustermesh/*"
+    }]
+  })
 }

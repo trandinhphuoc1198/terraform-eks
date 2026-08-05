@@ -160,6 +160,11 @@ module "irsa" {
       namespace       = "kube-system"
       policy_json     = local.ebs_csi_irsa_policy
     }
+    external-secrets = {
+      service_account = "external-secrets"
+      namespace       = "external-secrets"
+      policy_json     = local.eso_irsa_policy_hub
+    }
   }
 }
 
@@ -177,25 +182,23 @@ module "k8s" {
 
 # ── EC2: master node + shared IAM/SG resources ────────────────────────────────
 module "ec2" {
-  source                      = "../../modules/ec2"
-  env                         = var.env
-  vpc_id                      = module.vpc.vpc_id
-  vpc_cidr                    = var.vpc_cidr
-  private_subnet_ids          = module.vpc.private_subnet_ids
-  master_instance_type        = var.master_instance_type
-  key_name                    = var.key_name
-  master_private_ip           = var.master_private_ip
-  master_volume_size          = var.master_volume_size
-  cluster_name                = var.cluster_name
-  ami_id                      = module.ami.ami_id
-  s3_bucket_arns              = module.s3.bucket_arns
-  install_eso                 = true
-  install_clustermesh_ca_push = true
-  install_karpenter           = false
-  vpc_cidr_supernet           = var.vpc_cidr_supernet
-  clustermesh_nodeport        = var.clustermesh_nodeport
-  oidc_bucket_arn             = data.terraform_remote_state.network.outputs.oidc_bucket_arn
-  oidc_s3_prefix              = local.oidc_s3_prefix
+  source               = "../../modules/ec2"
+  env                  = var.env
+  vpc_id               = module.vpc.vpc_id
+  vpc_cidr             = var.vpc_cidr
+  private_subnet_ids   = module.vpc.private_subnet_ids
+  master_instance_type = var.master_instance_type
+  key_name             = var.key_name
+  master_private_ip    = var.master_private_ip
+  master_volume_size   = var.master_volume_size
+  cluster_name         = var.cluster_name
+  ami_id               = module.ami.ami_id
+  s3_bucket_arns       = module.s3.bucket_arns
+  install_karpenter    = false
+  vpc_cidr_supernet    = var.vpc_cidr_supernet
+  clustermesh_nodeport = var.clustermesh_nodeport
+  oidc_bucket_arn      = data.terraform_remote_state.network.outputs.oidc_bucket_arn
+  oidc_s3_prefix       = local.oidc_s3_prefix
 }
 
 # ── ASG: worker node Auto Scaling Group ───────────────────────────────────────
@@ -231,7 +234,45 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
+# ── IRSA: External Secrets Operator ─────────────────────────────────────────
+# Combines BOTH of ESO's previous credential paths on hub into one role
+# (one ESO controller Pod/SA backs both SecretStores):
+#   - argocd-clusters-store used a static "eso-secrets-reader" IAM user +
+#     aws-creds Secret, seeded by the now-removed
+#     .github/scripts/bootstrap-eso-secret.sh.tpl
+#   - clustermesh-secrets-store relied on the node's EC2 instance-profile
+#     role (install_clustermesh_ca_push on modules/ec2, now removed)
+locals {
+  eso_irsa_policy_hub = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadArgocdClusterRegistrationSecrets"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecrets"
+        ]
+        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:argocd-clusters/*"
+      },
+      {
+        Sid    = "PushClustermeshCA"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:clustermesh/*"
+      }
+    ]
+  })
+}
 resource "aws_iam_role" "argocd_registration_ci" {
   name = "${var.env}-argocd-registration-ci"
 
