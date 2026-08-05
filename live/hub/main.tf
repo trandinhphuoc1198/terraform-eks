@@ -234,7 +234,6 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 # ── IRSA: External Secrets Operator ─────────────────────────────────────────
 # Combines BOTH of ESO's previous credential paths on hub into one role
