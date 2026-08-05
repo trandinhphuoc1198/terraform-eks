@@ -295,7 +295,7 @@ is what actually releases those.
 
 All roots use an **S3 backend** with **S3 native locking**
 (`use_lockfile = true` - no DynamoDB table required), bucket
-`terraform-state-phuoctd6`, region `ap-northeast-1`. Each root's `key` is
+`terraform-phuoctd6`, region `ap-northeast-1`. Each root's `key` is
 supplied at `terraform init` time via `-backend-config=envs/<env>/backend.hcl`
 so `backend.tf` itself stays identical across environments:
 
