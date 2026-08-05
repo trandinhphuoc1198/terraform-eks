@@ -45,6 +45,42 @@ locals {
   oidc_s3_prefix  = var.env
   oidc_issuer_url = "https://${data.terraform_remote_state.network.outputs.oidc_bucket_regional_domain_name}/${local.oidc_s3_prefix}"
 
+  # ── IRSA: External Secrets Operator ─────────────────────────────────────────
+  # Combines BOTH of ESO's previous credential paths on hub into one role
+  # (one ESO controller Pod/SA backs both SecretStores):
+  #   - argocd-clusters-store used a static "eso-secrets-reader" IAM user +
+  #     aws-creds Secret, seeded by the now-removed
+  #     .github/scripts/bootstrap-eso-secret.sh.tpl
+  #   - clustermesh-secrets-store relied on the node's EC2 instance-profile
+  #     role (install_clustermesh_ca_push on modules/ec2, now removed)
+  eso_irsa_policy_hub = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadArgocdClusterRegistrationSecrets"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecrets"
+        ]
+        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:argocd-clusters/*"
+      },
+      {
+        Sid    = "PushClustermeshCA"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:clustermesh/*"
+      }
+    ]
+  })
+
   # EBS CSI pilot policy - deliberately a straight copy of modules/ec2's
   # worker_ebs statements (same tag-scoping pattern), just attached to a
   # role trusted only for the aws-ebs-csi-driver controller ServiceAccount
@@ -118,6 +154,32 @@ locals {
       }
     ]
   })
+
+  loki_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "LokiOwnBucketOnly"
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = [
+        "arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}",
+        "arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}/*"
+      ]
+    }]
+  })
+
+  tempo_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "TempoOwnBucketOnly"
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = [
+        "arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}",
+        "arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}/*"
+      ]
+    }]
+  })
 }
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
@@ -164,6 +226,16 @@ module "irsa" {
       service_account = "external-secrets"
       namespace       = "external-secrets"
       policy_json     = local.eso_irsa_policy_hub
+    }
+    loki = {
+      service_account = "loki"
+      namespace       = "monitoring"
+      policy_json     = local.loki_irsa_policy
+    }
+    tempo = {
+      service_account = "tempo"
+      namespace       = "monitoring"
+      policy_json     = local.tempo_irsa_policy
     }
   }
 }
@@ -235,43 +307,6 @@ data "aws_iam_openid_connect_provider" "github" {
 
 data "aws_caller_identity" "current" {}
 
-# ── IRSA: External Secrets Operator ─────────────────────────────────────────
-# Combines BOTH of ESO's previous credential paths on hub into one role
-# (one ESO controller Pod/SA backs both SecretStores):
-#   - argocd-clusters-store used a static "eso-secrets-reader" IAM user +
-#     aws-creds Secret, seeded by the now-removed
-#     .github/scripts/bootstrap-eso-secret.sh.tpl
-#   - clustermesh-secrets-store relied on the node's EC2 instance-profile
-#     role (install_clustermesh_ca_push on modules/ec2, now removed)
-locals {
-  eso_irsa_policy_hub = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ReadArgocdClusterRegistrationSecrets"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:ListSecrets"
-        ]
-        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:argocd-clusters/*"
-      },
-      {
-        Sid    = "PushClustermeshCA"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:CreateSecret",
-          "secretsmanager:PutSecretValue",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:TagResource",
-          "secretsmanager:GetSecretValue"
-        ]
-        Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:clustermesh/*"
-      }
-    ]
-  })
-}
 resource "aws_iam_role" "argocd_registration_ci" {
   name = "${var.env}-argocd-registration-ci"
 

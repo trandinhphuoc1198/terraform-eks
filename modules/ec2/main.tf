@@ -492,52 +492,6 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-
-# NOTE: create/delete actions are scoped with aws:RequestTag /
-# aws:ResourceTag conditions against kubernetes.io/cluster/<cluster_name>,
-# the same tag the ASG (modules/asg) already applies to every worker
-# instance and propagates at launch. This mirrors the tag-scoping pattern
-# already used in master_ccm_policy above, instead of leaving these
-# mutating EBS actions on Resource = "*" with no condition.
-#
-# This only actually narrows access if whatever creates the volume/snapshot
-# (the in-tree AWS EBS provisioner or the aws-ebs-csi-driver) is configured
-# to tag what it creates with this same key/value - e.g. via the CSI
-# driver's --extra-tags flag or --k8s-tag-cluster-id. If that's not
-# configured, CreateVolume/CreateSnapshot calls tagged with something else
-# (or untagged) will simply fail closed rather than silently being broad,
-# which is the safer failure mode but worth verifying against your actual
-# storage driver config.
-#
-resource "aws_iam_role_policy" "worker_tempo_loki" {
-  count = length(var.s3_bucket_arns) > 0 ? 1 : 0
-  name  = "${var.env}-k8s-worker-tempo_loki-policy"
-  role  = aws_iam_role.worker.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = length(var.s3_bucket_arns) > 0 ? [
-      {
-        Sid    = "S3Access"
-        Effect = "Allow"
-
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
-        ]
-
-        Resource = flatten([
-          var.s3_bucket_arns,
-          [for arn in var.s3_bucket_arns : "${arn}/*"]
-        ])
-      }
-    ] : []
-  })
-}
-
 data "aws_partition" "current" {}
 
 resource "aws_iam_role_policy" "worker_karpenter" {
