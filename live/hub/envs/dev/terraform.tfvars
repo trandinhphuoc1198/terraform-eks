@@ -27,5 +27,5 @@ k8s_version = "1.33.2"
 
 bucket_names = [
   "tempo-s3-phuoctd6",
-  "log-s3-phuoctd6"
+  "loki-s3-phuoctd6"
 ]
