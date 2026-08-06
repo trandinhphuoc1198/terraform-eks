@@ -25,6 +25,20 @@ IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-
 PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
 AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
 
+# ── IRSA role ARNs for the two day-0 workloads ────────────────────────────
+# NEW - as of moving cilium-operator and aws-ccm off the node instance
+# profile and onto IRSA. Both roles already exist for the ArgoCD-managed
+# steady state (platform/values/hub/cilium.yaml's operator.extraEnv,
+# platform/values/hub/aws-ccm.yaml's env) - this just wires the SAME two
+# role ARNs into the inline day-0 install below, since neither
+# pod-identity-webhook nor ArgoCD exists yet at this point in the
+# bootstrap. Must be passed in via the Terraform templatefile() call that
+# renders this script (e.g. module.irsa.roles["cilium-operator"].arn /
+# module.irsa.roles["aws-ccm"].arn) - see the note at the bottom of this
+# file for what to add on the Terraform side.
+CILIUM_OPERATOR_ROLE_ARN="${cilium_operator_role_arn}"
+AWS_CCM_ROLE_ARN="${aws_ccm_role_arn}"
+
 # ── Create Kubeadm Cluster Configuration ─────────────────────────────────
 cat <<EOF > /tmp/kubeadm-config.yaml
 apiVersion: kubeadm.k8s.io/v1beta3
@@ -100,6 +114,11 @@ done
 # managed OIDC endpoint works too) - and mirrors them verbatim to the
 # public bucket at the same path structure the issuer URL implies. No
 # manual JWK/RSA math, no possibility of a kid mismatch.
+#
+# This MUST run before the Cilium/CCM installs below now that both use
+# IRSA - kube-apiserver's OIDC discovery has to be publicly resolvable
+# before AWS STS can validate a projected service-account token from
+# either of them.
 if [ -n "${oidc_issuer_url}" ]; then
   echo "=== Publishing OIDC discovery documents to S3 for IRSA ===" >> /var/log/kubeadm-init.log
   mkdir -p /tmp/oidc
@@ -136,11 +155,52 @@ if [ "$INSTALL_CNI_CCM" = "true" ]; then
   helm repo add cilium https://helm.cilium.io/
   helm repo update
 
+  # ── cilium-operator IRSA values ─────────────────────────────────────────
+  # NEW - cilium-operator needs real AWS credentials for its ENI IPAM calls
+  # (DescribeSubnets/CreateNetworkInterface/AssignPrivateIpAddresses/...).
+  # It used to get these from the node's instance-profile role; now that
+  # role is gone, so the operator container needs a projected
+  # service-account token + AWS_ROLE_ARN/AWS_WEB_IDENTITY_TOKEN_FILE env
+  # vars pointed at CILIUM_OPERATOR_ROLE_ARN, mirroring
+  # platform/values/hub/cilium.yaml's operator block exactly (this is the
+  # SAME "inject directly, no pod-identity-webhook" pattern that file
+  # already documents - it just has to happen here too, since ArgoCD
+  # hasn't reconciled anything yet at day-0).
+  #
+  # Written as a values file rather than --set, since --set into
+  # deeply-nested list-of-maps (extraVolumes[0].projected.sources[0]...)
+  # is fragile and hard to read; a values file also matches the format
+  # already committed in platform/values/hub/cilium.yaml, so this stays a
+  # close 1:1 mirror instead of a second, drifting representation.
+  cat <<IRSAEOF > /tmp/cilium-irsa-values.yaml
+operator:
+  extraVolumes:
+    - name: aws-iam-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: sts.amazonaws.com
+              expirationSeconds: 3600
+              path: token
+  extraVolumeMounts:
+    - name: aws-iam-token
+      mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+      readOnly: true
+  extraEnv:
+    - name: AWS_ROLE_ARN
+      value: "$CILIUM_OPERATOR_ROLE_ARN"
+    - name: AWS_WEB_IDENTITY_TOKEN_FILE
+      value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+    - name: AWS_REGION
+      value: "$AWS_REGION"
+IRSAEOF
+
   for i in $(seq 1 5); do
     helm upgrade --install cilium cilium/cilium \
     --version "1.20.0-rc.1" \
     --namespace kube-system \
     --create-namespace \
+    -f /tmp/cilium-irsa-values.yaml \
     --set operator.replicas=1 \
     --set kubeProxyReplacement=true \
     --set k8sServiceHost="$PRIVATE_IP" \
@@ -188,8 +248,39 @@ if [ "$INSTALL_CNI_CCM" = "true" ]; then
   echo "=== Installing AWS CCM ===" >> /var/log/kubeadm-init.log
   helm repo add aws-cloud-controller-manager https://kubernetes.github.io/cloud-provider-aws
   helm repo update
+
+  # ── aws-ccm IRSA values ──────────────────────────────────────────────────
+  # NEW - same rationale as cilium-operator above, but this chart takes
+  # extraVolumes/extraVolumeMounts/env at the TOP LEVEL, not nested under a
+  # sub-key - mirrors platform/values/hub/aws-ccm.yaml exactly. CCM needs
+  # this to call EC2/ELB APIs (node metadata sync, LoadBalancer Service
+  # provisioning for the Gateway NLBs) now that the instance-profile role
+  # is gone.
+  cat <<IRSAEOF > /tmp/aws-ccm-irsa-values.yaml
+extraVolumes:
+  - name: aws-iam-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: sts.amazonaws.com
+            expirationSeconds: 3600
+            path: token
+extraVolumeMounts:
+  - name: aws-iam-token
+    mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+    readOnly: true
+env:
+  - name: AWS_ROLE_ARN
+    value: "$AWS_CCM_ROLE_ARN"
+  - name: AWS_WEB_IDENTITY_TOKEN_FILE
+    value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+  - name: AWS_REGION
+    value: "$AWS_REGION"
+IRSAEOF
+
   helm upgrade --install aws-cloud-controller-manager aws-cloud-controller-manager/aws-cloud-controller-manager \
     --namespace kube-system \
+    -f /tmp/aws-ccm-irsa-values.yaml \
     --set 'args={--v=2,--cloud-provider=aws,--configure-cloud-routes=false}'
 
   echo "=== Waiting for uninitialized taint to clear ===" >> /var/log/kubeadm-init.log
@@ -259,3 +350,37 @@ SERVICEUNIT
 
 systemctl daemon-reload
 systemctl enable --now k8s-join-token-rotate.timer
+
+# ─────────────────────────────────────────────────────────────────────────
+# TERRAFORM SIDE - what you still need to wire up for this to work:
+#
+# 1. Two new template vars on the templatefile() call that renders this
+#    script (wherever install_cni_ccm / oidc_issuer_url are already
+#    passed in - likely modules/k8s or live/hub/main.tf):
+#
+#      cilium_operator_role_arn = module.irsa.roles["cilium-operator"].arn
+#      aws_ccm_role_arn         = module.irsa.roles["aws-ccm"].arn
+#
+#    On spoke's templatefile() call these can stay "" - INSTALL_CNI_CCM is
+#    false there so the block referencing them never runs, but
+#    templatefile() still requires every referenced var to be passed.
+#
+# 2. Confirm module.irsa actually creates both roles with a trust policy
+#    scoped to this cluster's own OIDC provider + the right
+#    ServiceAccount subject (system:serviceaccount:kube-system:cilium-operator
+#    and system:serviceaccount:kube-system:cloud-controller-manager, or
+#    whatever the two charts' default ServiceAccount names resolve to -
+#    verify against `helm template` output for each chart at your pinned
+#    versions before first apply). These are the exact same role ARNs
+#    platform/values/hub/cilium.yaml and platform/values/hub/aws-ccm.yaml
+#    already reference for the ArgoCD-managed steady state, so if those
+#    roles already exist for that purpose, reuse the same ARNs here rather
+#    than creating new ones - there's no reason for day-0 and steady-state
+#    to authenticate as two different identities for the same workload.
+#
+# 3. Since the node instance-profile role no longer grants EC2/ELB
+#    permissions, double-check nothing ELSE on this node (e.g. any
+#    lingering IMDS-based tooling) was silently depending on that same
+#    instance-profile policy for something unrelated to Cilium/CCM before
+#    you tighten it further.
+# ─────────────────────────────────────────────────────────────────────────

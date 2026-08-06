@@ -41,3 +41,15 @@ variable "oidc_s3_prefix" {
   type        = string
   default     = ""
 }
+
+variable "cilium_operator_role_arn" {
+  description = "The ARN of the IAM role for the Cilium operator"
+  type        = string
+  default     = ""
+}
+
+variable "aws_ccm_role_arn" {
+  description = "The ARN of the IAM role for the AWS CCM"
+  type        = string
+  default     = ""
+}

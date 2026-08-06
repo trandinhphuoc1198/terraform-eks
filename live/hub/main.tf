@@ -400,14 +400,16 @@ module "irsa" {
 
 # ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
 module "k8s" {
-  source            = "../../modules/k8s"
-  k8s_version       = var.k8s_version
-  env               = var.env
-  vpc_cidr_supernet = var.vpc_cidr_supernet
-  install_cni_ccm   = true # Argo CD runs here - can't install its own dependency
-  oidc_issuer_url   = local.oidc_issuer_url
-  oidc_s3_bucket    = data.terraform_remote_state.network.outputs.oidc_bucket_id
-  oidc_s3_prefix    = local.oidc_s3_prefix
+  source                   = "../../modules/k8s"
+  k8s_version              = var.k8s_version
+  env                      = var.env
+  vpc_cidr_supernet        = var.vpc_cidr_supernet
+  install_cni_ccm          = true # Argo CD runs here - can't install its own dependency
+  oidc_issuer_url          = local.oidc_issuer_url
+  oidc_s3_bucket           = data.terraform_remote_state.network.outputs.oidc_bucket_id
+  oidc_s3_prefix           = local.oidc_s3_prefix
+  aws_ccm_role_arn         = module.irsa.role_arns["aws-cloud-controller-manager"]
+  cilium_operator_role_arn = module.irsa.role_arns["cilium-operator"]
 }
 
 # ── EC2: master node + shared IAM/SG resources ────────────────────────────────
