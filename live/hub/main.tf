@@ -35,6 +35,8 @@ check "no_duplicate_cidrs" {
   }
 }
 
+data "aws_partition" "current" {}
+
 # ── IRSA / OIDC ─────────────────────────────────────────────────────────────
 # This cluster's own prefix inside the shared bucket from global/network.
 # cluster_prefix intentionally reuses var.env (e.g. "hub-dev") - same value
@@ -180,6 +182,152 @@ locals {
       ]
     }]
   })
+
+  # ── IRSA: AWS Cloud Controller Manager ──────────────────────────────────
+  # Straight copy of modules/ec2's master_ccm_policy statements, attached to
+  # a role trusted only for the aws-cloud-controller-manager ServiceAccount
+  # (kube-system) instead of the whole master node role. CCM's own pod is
+  # what actually calls these APIs, so it never needed the rest of the
+  # master role's permissions (SSM write, Cluster Autoscaler, etc).
+  ccm_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeRegions",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeInstanceTopology"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "CreateSecurityGroupTaggedForThisCluster"
+        Effect   = "Allow"
+        Action   = "ec2:CreateSecurityGroup"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+        }
+      },
+      {
+        Sid    = "MutateOnlyResourcesTaggedForThisCluster"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+          "ec2:DeleteSecurityGroup",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+        }
+      },
+      {
+        Sid    = "ELBManageForCCMProvisionedLoadBalancers"
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:CreateLoadBalancer",
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeLoadBalancerAttributes",
+          "elasticloadbalancing:ModifyLoadBalancerAttributes",
+          "elasticloadbalancing:CreateListener",
+          "elasticloadbalancing:DeleteListener",
+          "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:ModifyListener",
+          "elasticloadbalancing:CreateTargetGroup",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetGroupAttributes",
+          "elasticloadbalancing:ModifyTargetGroup",
+          "elasticloadbalancing:ModifyTargetGroupAttributes",
+          "elasticloadbalancing:RegisterTargets",
+          "elasticloadbalancing:DeregisterTargets",
+          "elasticloadbalancing:DescribeTargetHealth",
+          "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+          "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+          "elasticloadbalancing:CreateLoadBalancerListeners",
+          "elasticloadbalancing:DeleteLoadBalancerListeners",
+          "elasticloadbalancing:ConfigureHealthCheck",
+          "elasticloadbalancing:AttachLoadBalancerToSubnets",
+          "elasticloadbalancing:DetachLoadBalancerFromSubnets",
+          "elasticloadbalancing:ApplySecurityGroupsToLoadBalancer",
+          "elasticloadbalancing:SetLoadBalancerPoliciesOfListener",
+          "elasticloadbalancing:CreateLoadBalancerPolicy",
+          "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:RemoveTags",
+          "elasticloadbalancing:DescribeTags",
+          "ec2:DescribeVpcs"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  # ── IRSA: Cilium ENI-mode IPAM (cilium-operator) ────────────────────────
+  # Straight copy of modules/ec2's cilium_eni statements. cilium-operator
+  # runs as a single Deployment/ServiceAccount (kube-system), same shape as
+  # EBS CSI's controller - see the TODO already sitting on
+  # modules/ec2/main.tf's cilium_eni block.
+  cilium_operator_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "CiliumENIReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeVpcPeeringConnections",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeTags"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CiliumENILifecycle"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:AttachNetworkInterface",
+          "ec2:DetachNetworkInterface",
+          "ec2:DeleteNetworkInterface",
+          "ec2:ModifyNetworkInterfaceAttribute",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses",
+          "ec2:AssignIpv6Addresses",
+          "ec2:UnassignIpv6Addresses"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "CiliumENICreateTagsOnNewInterfaces"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateTags"]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:*:*:network-interface/*"
+        Condition = {
+          StringEquals = { "ec2:CreateAction" = "CreateNetworkInterface" }
+        }
+      }
+    ]
+  })
 }
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
@@ -210,7 +358,7 @@ module "tgw_attachment" {
   peer_cidr_blocks      = var.spoke_vpc_cidrs
 }
 
-# ── IRSA: register this cluster's OIDC issuer + the EBS CSI pilot role ──────
+# ── IRSA: register this cluster's OIDC issuer + workload roles ──────────────
 module "irsa" {
   source          = "../../modules/irsa"
   cluster_prefix  = local.oidc_s3_prefix
@@ -236,6 +384,16 @@ module "irsa" {
       service_account = "tempo"
       namespace       = "observability"
       policy_json     = local.tempo_irsa_policy
+    }
+    aws-cloud-controller-manager = {
+      service_account = "aws-cloud-controller-manager"
+      namespace       = "kube-system"
+      policy_json     = local.ccm_irsa_policy
+    }
+    cilium-operator = {
+      service_account = "cilium-operator"
+      namespace       = "kube-system"
+      policy_json     = local.cilium_operator_irsa_policy
     }
   }
 }

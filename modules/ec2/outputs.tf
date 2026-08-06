@@ -22,6 +22,16 @@ output "worker_iam_instance_profile_name" {
   value       = aws_iam_instance_profile.worker.name
 }
 
+output "worker_iam_instance_profile_arn" {
+  description = "Instance profile ARN for worker nodes - needed by Karpenter's IRSA policy (iam:GetInstanceProfile) since Karpenter launches new workers under this exact profile"
+  value       = aws_iam_instance_profile.worker.arn
+}
+
+output "worker_iam_role_arn" {
+  description = "Worker IAM role ARN - needed by Karpenter's IRSA policy (iam:PassRole) to launch new EC2 instances with this role"
+  value       = aws_iam_role.worker.arn
+}
+
 output "ssm_join_token_arn" {
   description = "ARN of the SSM parameter storing the kubeadm join token"
   value       = aws_ssm_parameter.cluster_join_token.arn

@@ -18,6 +18,10 @@ check "no_cidr_overlap" {
   }
 }
 
+data "aws_partition" "current" {}
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
 # ── IRSA / OIDC ─────────────────────────────────────────────────────────────
 # Mirrors live/hub/main.tf's block - see the comments there. This cluster's
 # issuer/prefix is entirely independent of the hub's; a spoke pod's token
@@ -96,6 +100,295 @@ locals {
       }
     ]
   })
+
+  # ── IRSA: AWS Cloud Controller Manager ──────────────────────────────────
+  # Identical statements to live/hub's ccm_irsa_policy - see that file for
+  # rationale. Kept as a separate local (not shared) since each cluster's
+  # policy resolves var.cluster_name against its own root.
+  ccm_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeRegions",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeInstanceTopology"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "CreateSecurityGroupTaggedForThisCluster"
+        Effect   = "Allow"
+        Action   = "ec2:CreateSecurityGroup"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+        }
+      },
+      {
+        Sid    = "MutateOnlyResourcesTaggedForThisCluster"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+          "ec2:DeleteSecurityGroup",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+        }
+      },
+      {
+        Sid    = "ELBManageForCCMProvisionedLoadBalancers"
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:CreateLoadBalancer",
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeLoadBalancerAttributes",
+          "elasticloadbalancing:ModifyLoadBalancerAttributes",
+          "elasticloadbalancing:CreateListener",
+          "elasticloadbalancing:DeleteListener",
+          "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:ModifyListener",
+          "elasticloadbalancing:CreateTargetGroup",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetGroupAttributes",
+          "elasticloadbalancing:ModifyTargetGroup",
+          "elasticloadbalancing:ModifyTargetGroupAttributes",
+          "elasticloadbalancing:RegisterTargets",
+          "elasticloadbalancing:DeregisterTargets",
+          "elasticloadbalancing:DescribeTargetHealth",
+          "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+          "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+          "elasticloadbalancing:CreateLoadBalancerListeners",
+          "elasticloadbalancing:DeleteLoadBalancerListeners",
+          "elasticloadbalancing:ConfigureHealthCheck",
+          "elasticloadbalancing:AttachLoadBalancerToSubnets",
+          "elasticloadbalancing:DetachLoadBalancerFromSubnets",
+          "elasticloadbalancing:ApplySecurityGroupsToLoadBalancer",
+          "elasticloadbalancing:SetLoadBalancerPoliciesOfListener",
+          "elasticloadbalancing:CreateLoadBalancerPolicy",
+          "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:RemoveTags",
+          "elasticloadbalancing:DescribeTags",
+          "ec2:DescribeVpcs"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  # ── IRSA: Cilium ENI-mode IPAM (cilium-operator) ────────────────────────
+  cilium_operator_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "CiliumENIReadOnlyDescribe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeVpcPeeringConnections",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeTags"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CiliumENILifecycle"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:AttachNetworkInterface",
+          "ec2:DetachNetworkInterface",
+          "ec2:DeleteNetworkInterface",
+          "ec2:ModifyNetworkInterfaceAttribute",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses",
+          "ec2:AssignIpv6Addresses",
+          "ec2:UnassignIpv6Addresses"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "CiliumENICreateTagsOnNewInterfaces"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateTags"]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:*:*:network-interface/*"
+        Condition = {
+          StringEquals = { "ec2:CreateAction" = "CreateNetworkInterface" }
+        }
+      }
+    ]
+  })
+
+  # ── IRSA: Karpenter (spoke only - hub runs no Karpenter, see modules/ec2's
+  # install_karpenter). Straight copy of modules/ec2's worker_karpenter
+  # statements, minus the ones that only made sense scoped to the whole
+  # node role (SSM/EC2 read is unconditional there because every node
+  # needed it for other things too - here it's just what Karpenter itself
+  # needs). References module.ec2's worker role/profile ARNs directly
+  # since Karpenter provisions new nodes under that exact role/profile.
+  karpenter_irsa_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "KarpenterEC2ResourceDiscovery"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeCapacityReservations",
+          "ec2:DescribeImages",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceStatus",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeInstanceTypeOfferings",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSpotPriceHistory",
+          "ec2:DescribeSubnets"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "KarpenterEC2Provisioning"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateFleet",
+          "ec2:CreateLaunchTemplate",
+          "ec2:RunInstances"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "KarpenterCreateTagsDuringProvisioning"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags"
+        ]
+        Resource = [
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:fleet/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:launch-template/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:network-interface/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:spot-instances-request/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:volume/*"
+        ]
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction" = [
+              "CreateFleet",
+              "CreateLaunchTemplate",
+              "RunInstances"
+            ]
+          }
+        }
+      },
+      {
+        Sid    = "KarpenterTagOwnedInstances"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags"
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+          StringLike = {
+            "aws:ResourceTag/karpenter.sh/nodepool" = "*"
+          }
+        }
+      },
+      {
+        Sid    = "KarpenterTerminateOwnedInstances"
+        Effect = "Allow"
+        Action = [
+          "ec2:TerminateInstances"
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+          StringLike = {
+            "aws:ResourceTag/karpenter.sh/nodepool" = "*"
+          }
+        }
+      },
+      {
+        Sid    = "KarpenterDeleteOwnedLaunchTemplates"
+        Effect = "Allow"
+        Action = [
+          "ec2:DeleteLaunchTemplate"
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:launch-template/*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
+          }
+          StringLike = {
+            "aws:ResourceTag/karpenter.sh/nodepool" = "*"
+          }
+        }
+      },
+      {
+        Sid      = "KarpenterGetWorkerInstanceProfile"
+        Effect   = "Allow"
+        Action   = ["iam:GetInstanceProfile"]
+        Resource = module.ec2.worker_iam_instance_profile_arn
+      },
+      {
+        Sid      = "KarpenterListInstanceProfiles"
+        Effect   = "Allow"
+        Action   = ["iam:ListInstanceProfiles"]
+        Resource = "*"
+      },
+      {
+        Sid      = "KarpenterPassWorkerRole"
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = module.ec2.worker_iam_role_arn
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ec2.amazonaws.com"
+          }
+        }
+      },
+      {
+        Sid      = "KarpenterReadSSMParameters"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter/aws/service/*"
+      },
+      {
+        Sid      = "KarpenterReadPricing"
+        Effect   = "Allow"
+        Action   = ["pricing:GetProducts"]
+        Resource = "*"
+      }
+    ]
+  })
 }
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
@@ -126,39 +419,9 @@ module "tgw_attachment" {
   peer_cidr_blocks      = [var.hub_vpc_cidr]
 }
 
-# ── IRSA: register this cluster's OIDC issuer + the EBS CSI pilot role ──────
-module "irsa" {
-  source          = "../../modules/irsa"
-  cluster_prefix  = local.oidc_s3_prefix
-  oidc_issuer_url = local.oidc_issuer_url
-
-  roles = {
-    ebs-csi-controller = {
-      service_account = "ebs-csi-controller-sa"
-      namespace       = "kube-system"
-      policy_json     = local.ebs_csi_irsa_policy
-    }
-    external-secrets = {
-      service_account = "external-secrets"
-      namespace       = "external-secrets"
-      policy_json     = local.eso_irsa_policy_spoke
-    }
-  }
-}
-
-# ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
-module "k8s" {
-  source            = "../../modules/k8s"
-  k8s_version       = var.k8s_version
-  env               = var.env
-  vpc_cidr_supernet = var.vpc_cidr_supernet
-  install_cni_ccm   = false # Argo CD (hub) installs CNI/CCM after this spoke registers
-  oidc_issuer_url   = local.oidc_issuer_url
-  oidc_s3_bucket    = data.terraform_remote_state.network.outputs.oidc_bucket_id
-  oidc_s3_prefix    = local.oidc_s3_prefix
-}
-
 # ── EC2: master node + shared IAM/SG resources ────────────────────────────────
+# Moved above module.irsa (karpenter_irsa_policy needs module.ec2's worker
+# role/profile ARN outputs).
 module "ec2" {
   source                  = "../../modules/ec2"
   env                     = var.env
@@ -178,6 +441,53 @@ module "ec2" {
   clustermesh_nodeport    = var.clustermesh_nodeport
   oidc_bucket_arn         = data.terraform_remote_state.network.outputs.oidc_bucket_arn
   oidc_s3_prefix          = local.oidc_s3_prefix
+}
+
+# ── IRSA: register this cluster's OIDC issuer + workload roles ──────────────
+module "irsa" {
+  source          = "../../modules/irsa"
+  cluster_prefix  = local.oidc_s3_prefix
+  oidc_issuer_url = local.oidc_issuer_url
+
+  roles = {
+    ebs-csi-controller = {
+      service_account = "ebs-csi-controller-sa"
+      namespace       = "kube-system"
+      policy_json     = local.ebs_csi_irsa_policy
+    }
+    external-secrets = {
+      service_account = "external-secrets"
+      namespace       = "external-secrets"
+      policy_json     = local.eso_irsa_policy_spoke
+    }
+    aws-cloud-controller-manager = {
+      service_account = "aws-cloud-controller-manager"
+      namespace       = "kube-system"
+      policy_json     = local.ccm_irsa_policy
+    }
+    cilium-operator = {
+      service_account = "cilium-operator"
+      namespace       = "kube-system"
+      policy_json     = local.cilium_operator_irsa_policy
+    }
+    karpenter = {
+      service_account = "karpenter"
+      namespace       = "kube-system"
+      policy_json     = local.karpenter_irsa_policy
+    }
+  }
+}
+
+# ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
+module "k8s" {
+  source            = "../../modules/k8s"
+  k8s_version       = var.k8s_version
+  env               = var.env
+  vpc_cidr_supernet = var.vpc_cidr_supernet
+  install_cni_ccm   = false # Argo CD (hub) installs CNI/CCM after this spoke registers
+  oidc_issuer_url   = local.oidc_issuer_url
+  oidc_s3_bucket    = data.terraform_remote_state.network.outputs.oidc_bucket_id
+  oidc_s3_prefix    = local.oidc_s3_prefix
 }
 
 # ── ASG: worker node Auto Scaling Group ───────────────────────────────────────
@@ -200,7 +510,6 @@ module "asg" {
   depends_on = [module.vpc]
 }
 
-data "aws_caller_identity" "current" {}
 # ── IRSA: External Secrets Operator (clustermesh CA pull only) ──────────────
 # Replaces install_clustermesh_ca_pull's node instance-profile grant
 # (modules/ec2, now removed) that platform/clustermesh/spoke/

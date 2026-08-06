@@ -63,21 +63,6 @@ variable "clustermesh_nodeport" {
   default     = 32379
 }
 
-variable "install_karpenter" {
-  description = <<-EOT
-    If true, grants the worker IAM role the EC2/IAM permissions Karpenter
-    needs to provision/terminate nodes itself. Set true on spokes -
-    Karpenter runs there to spawn the actual workload nodes, while the ASG
-    only carries platform pods (Karpenter itself, ebs-csi, cert-manager,
-    etc). Set false on the hub - the hub runs everything (including Argo
-    CD) directly on ASG-launched workers with no Karpenter, so there are
-    no Karpenter-provisioned nodes outside Terraform's state for
-    terraform destroy / drain-cluster.yml to ever have to worry about.
-  EOT
-  type        = bool
-  default     = true
-}
-
 # ── IRSA / OIDC ────────────────────────────────────────────────────────────
 variable "oidc_bucket_arn" {
   description = "ARN of the shared IRSA OIDC bucket (modules/oidc-bucket's bucket_arn). If set, grants the master role s3:PutObject scoped to this cluster's own prefix only, so master_init.sh.tpl can publish its OIDC discovery doc + JWKS. Leave \"\" (default) to skip IRSA entirely."
