@@ -18,7 +18,7 @@ master_private_ip    = "10.0.11.10"
 
 worker_min         = 1
 worker_max         = 3
-worker_desired     = 3
+worker_desired     = 2
 worker_volume_size = 20
 master_volume_size = 20
 

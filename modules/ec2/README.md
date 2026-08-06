@@ -160,7 +160,6 @@ Both master and worker use the shared Packer-built k8s base AMI
 | `vpc_cidr` | `string` | - | VPC CIDR - scopes the master/worker SSH ingress rules to VPC-internal only |
 | `private_subnet_ids` | `list(string)` | - | Private subnet IDs - master is placed in `[0]` |
 | `master_instance_type` | `string` | - | EC2 instance type for the master node |
-| `key_name` | `string` | - | EC2 SSH key pair name |
 | `master_private_ip` | `string` | `null` | Optional fixed private IP for the master node; if `null`, assigned automatically |
 | `master_volume_size` | `number` | `20` | Root EBS volume size in GB for the master node |
 | `cluster_name` | `string` | - | Kubernetes cluster name - applied as tags for CCM/Cluster Autoscaler discovery |

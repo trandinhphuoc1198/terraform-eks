@@ -79,7 +79,6 @@ independent of this Terraform module.
 |---|---|---|---|
 | `env` | `string` | - | Environment name - prefix for resource names and ASG tags |
 | `worker_instance_type` | `string` | - | EC2 instance type for all worker nodes |
-| `key_name` | `string` | - | EC2 SSH key pair name |
 | `private_subnet_ids` | `list(string)` | - | Private subnets the ASG distributes workers across |
 | `worker_sg_id` | `string` | - | Security group ID applied to all worker instances (from `ec2` module) |
 | `worker_iam_instance_profile_name` | `string` | - | IAM instance profile for workers (from `ec2` module) |

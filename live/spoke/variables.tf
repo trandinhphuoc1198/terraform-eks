@@ -56,11 +56,6 @@ variable "master_instance_type" {
   type        = string
 }
 
-variable "key_name" {
-  description = "EC2 SSH key pair name"
-  type        = string
-}
-
 variable "master_private_ip" {
   description = "Optional fixed private IP for the master node (e.g. 10.1.1.10); if null, an IP is assigned automatically"
   type        = string
