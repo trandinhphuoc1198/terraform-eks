@@ -385,8 +385,8 @@ module "irsa" {
       namespace       = "observability"
       policy_json     = local.tempo_irsa_policy
     }
-    aws-cloud-controller-manager = {
-      service_account = "aws-cloud-controller-manager"
+    cloud-controller-manager = {
+      service_account = "cloud-controller-manager"
       namespace       = "kube-system"
       policy_json     = local.ccm_irsa_policy
     }
