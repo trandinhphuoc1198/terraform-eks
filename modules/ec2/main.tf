@@ -346,7 +346,6 @@ resource "aws_instance" "master" {
   private_ip                  = var.master_private_ip
   associate_public_ip_address = false
   vpc_security_group_ids      = [aws_security_group.master.id]
-  key_name                    = var.key_name
   iam_instance_profile        = aws_iam_instance_profile.master.name
 
   # Required for Cilium native routing: AWS drops any packet whose source

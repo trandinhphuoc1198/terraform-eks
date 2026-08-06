@@ -1,6 +1,5 @@
 variable "env" { type = string }
 variable "worker_instance_type" { type = string }
-variable "key_name" { type = string }
 variable "private_subnet_ids" { type = list(string) }
 variable "worker_sg_id" { type = string }
 variable "worker_iam_instance_profile_name" { type = string }

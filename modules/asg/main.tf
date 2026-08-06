@@ -13,7 +13,6 @@ resource "aws_launch_template" "worker" {
   # lookup here anymore.
   image_id      = var.ami_id
   instance_type = var.worker_instance_type
-  key_name      = var.key_name
 
   iam_instance_profile {
     name = var.worker_iam_instance_profile_name

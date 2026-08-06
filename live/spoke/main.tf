@@ -429,7 +429,6 @@ module "ec2" {
   vpc_cidr                = var.vpc_cidr
   private_subnet_ids      = module.vpc.private_subnet_ids
   master_instance_type    = var.master_instance_type
-  key_name                = var.key_name
   master_private_ip       = var.master_private_ip
   master_volume_size      = var.master_volume_size
   cluster_name            = var.cluster_name
@@ -495,7 +494,6 @@ module "asg" {
   env                              = var.env
   cluster_name                     = var.cluster_name
   worker_instance_type             = var.worker_instance_type
-  key_name                         = var.key_name
   private_subnet_ids               = module.vpc.private_subnet_ids
   worker_sg_id                     = module.ec2.worker_sg_id
   worker_iam_instance_profile_name = module.ec2.worker_iam_instance_profile_name
