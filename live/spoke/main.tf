@@ -436,7 +436,6 @@ module "ec2" {
   ami_id                  = module.ami.ami_id
   trusted_api_cidr_blocks = [var.hub_vpc_cidr]
   register_with_hub       = true
-  install_karpenter       = true
   vpc_cidr_supernet       = var.vpc_cidr_supernet
   clustermesh_nodeport    = var.clustermesh_nodeport
   oidc_bucket_arn         = data.terraform_remote_state.network.outputs.oidc_bucket_arn

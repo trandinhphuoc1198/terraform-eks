@@ -424,7 +424,6 @@ module "ec2" {
   cluster_name         = var.cluster_name
   ami_id               = module.ami.ami_id
   s3_bucket_arns       = module.s3.bucket_arns
-  install_karpenter    = false
   vpc_cidr_supernet    = var.vpc_cidr_supernet
   clustermesh_nodeport = var.clustermesh_nodeport
   oidc_bucket_arn      = data.terraform_remote_state.network.outputs.oidc_bucket_arn
