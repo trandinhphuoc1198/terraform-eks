@@ -408,7 +408,7 @@ module "k8s" {
   oidc_issuer_url          = local.oidc_issuer_url
   oidc_s3_bucket           = data.terraform_remote_state.network.outputs.oidc_bucket_id
   oidc_s3_prefix           = local.oidc_s3_prefix
-  aws_ccm_role_arn         = module.irsa.role_arns["aws-cloud-controller-manager"]
+  aws_ccm_role_arn         = module.irsa.role_arns["cloud-controller-manager"]
   cilium_operator_role_arn = module.irsa.role_arns["cilium-operator"]
 }
 
