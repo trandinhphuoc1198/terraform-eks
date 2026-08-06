@@ -284,7 +284,7 @@ IRSAEOF
     --set 'args={--v=2,--cloud-provider=aws,--configure-cloud-routes=false}'
 
   echo "=== Waiting for uninitialized taint to clear ===" >> /var/log/kubeadm-init.log
-  timeout 120 bash -c 'until ! kubectl get nodes -o json | grep -q "node.cloudprovider.kubernetes.io/uninitialized"; do sleep 5; done'
+  timeout 240 bash -c 'until ! kubectl get nodes -o json | grep -q "node.cloudprovider.kubernetes.io/uninitialized"; do sleep 5; done'
 
   echo "=== Waiting for node to become Ready ===" >> /var/log/kubeadm-init.log
   kubectl wait node --all --for=condition=Ready --timeout=180s
@@ -350,37 +350,3 @@ SERVICEUNIT
 
 systemctl daemon-reload
 systemctl enable --now k8s-join-token-rotate.timer
-
-# ─────────────────────────────────────────────────────────────────────────
-# TERRAFORM SIDE - what you still need to wire up for this to work:
-#
-# 1. Two new template vars on the templatefile() call that renders this
-#    script (wherever install_cni_ccm / oidc_issuer_url are already
-#    passed in - likely modules/k8s or live/hub/main.tf):
-#
-#      cilium_operator_role_arn = module.irsa.roles["cilium-operator"].arn
-#      aws_ccm_role_arn         = module.irsa.roles["aws-ccm"].arn
-#
-#    On spoke's templatefile() call these can stay "" - INSTALL_CNI_CCM is
-#    false there so the block referencing them never runs, but
-#    templatefile() still requires every referenced var to be passed.
-#
-# 2. Confirm module.irsa actually creates both roles with a trust policy
-#    scoped to this cluster's own OIDC provider + the right
-#    ServiceAccount subject (system:serviceaccount:kube-system:cilium-operator
-#    and system:serviceaccount:kube-system:cloud-controller-manager, or
-#    whatever the two charts' default ServiceAccount names resolve to -
-#    verify against `helm template` output for each chart at your pinned
-#    versions before first apply). These are the exact same role ARNs
-#    platform/values/hub/cilium.yaml and platform/values/hub/aws-ccm.yaml
-#    already reference for the ArgoCD-managed steady state, so if those
-#    roles already exist for that purpose, reuse the same ARNs here rather
-#    than creating new ones - there's no reason for day-0 and steady-state
-#    to authenticate as two different identities for the same workload.
-#
-# 3. Since the node instance-profile role no longer grants EC2/ELB
-#    permissions, double-check nothing ELSE on this node (e.g. any
-#    lingering IMDS-based tooling) was silently depending on that same
-#    instance-profile policy for something unrelated to Cilium/CCM before
-#    you tighten it further.
-# ─────────────────────────────────────────────────────────────────────────
