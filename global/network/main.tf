@@ -15,12 +15,3 @@ resource "aws_ec2_transit_gateway" "main" {
 
   tags = { Name = "${var.env_prefix}-k8s-tgw" }
 }
-
-# ── IRSA: shared public OIDC discovery bucket ─────────────────────────────
-# One bucket, one prefix per cluster (hub-<env>, spoke-<env>, ...). Read by
-# both live/hub and live/spoke via terraform_remote_state, same pattern as
-# transit_gateway_id above. See modules/oidc-bucket/README.md.
-module "oidc_bucket" {
-  source      = "../../modules/oidc-bucket"
-  bucket_name = "irsa-oidc-${var.env_prefix}-phuoctd6"
-}

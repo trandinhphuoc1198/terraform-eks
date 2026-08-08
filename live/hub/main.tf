@@ -28,33 +28,176 @@ check "no_cidr_overlap" {
   }
 }
 
-check "no_duplicate_cidrs" {
-  assert {
-    condition     = length(local.cidr_ranges) == length(concat([var.vpc_cidr], var.spoke_vpc_cidrs))
-    error_message = "vpc_cidr and spoke_vpc_cidrs contain an exact duplicate CIDR - each cluster needs a distinct VPC CIDR."
+data "aws_partition" "current" {}
+data "aws_caller_identity" "current" {}
+
+# ── VPC ───────────────────────────────────────────────────────────────────
+# EKS still needs the same private/public subnet split,
+# NAT gateway, S3 endpoint, and SSM interface endpoints (SSM access to nodes
+# is still useful for debugging even though there's no more master to reach
+# this way). enable_karpenter_discovery stays false on hub, same as before -
+# hub runs no Karpenter workload pool, only the platform Managed Node Group.
+module "vpc" {
+  source                     = "../../modules/vpc"
+  env                        = var.env
+  vpc_cidr                   = var.vpc_cidr
+  public_subnet_cidrs        = var.public_subnet_cidrs
+  private_subnet_cidrs       = var.private_subnet_cidrs
+  region                     = var.region
+  cluster_name               = var.cluster_name
+  enable_karpenter_discovery = false
+}
+
+# ── Transit Gateway attachment - needed for Cluster Mesh ──
+module "tgw_attachment" {
+  source                = "../../modules/tgw-attachment"
+  env                   = var.env
+  transit_gateway_id    = data.terraform_remote_state.network.outputs.transit_gateway_id
+  vpc_id                = module.vpc.vpc_id
+  attachment_subnet_ids = module.vpc.private_subnet_ids
+  route_table_ids       = [module.vpc.private_route_table_id, module.vpc.public_route_table_id]
+  peer_cidr_blocks      = var.spoke_vpc_cidrs
+}
+
+# ── EKS control plane ───────────────────────────────────────────────────────
+# Replaces modules/ec2's master instance + modules/k8s's master_userdata
+# (kubeadm init/CNI bootstrap script) entirely - no master EC2 instance, no
+# SSM send-command bootstrap job. public_access_cidrs left wide open here
+# deliberately (see modules/eks/variables.tf's warning) so GitHub-hosted
+# Actions runners can reach the API server directly; tighten once you've
+# decided between IAM-only trust vs a self-hosted runner inside the VPC.
+module "eks" {
+  source                  = "../../modules/eks"
+  env                     = var.env
+  cluster_name            = var.cluster_name
+  cluster_version         = var.eks_cluster_version
+  vpc_id                  = module.vpc.vpc_id
+  private_subnet_ids      = module.vpc.private_subnet_ids
+  public_subnet_ids       = module.vpc.public_subnet_ids
+  endpoint_private_access = true
+  endpoint_public_access  = true
+  trusted_api_cidr_blocks = var.spoke_vpc_cidrs
+}
+
+# ── Node role, access entry, then the node group - IN THAT ORDER ───────────
+# EKS's API auth mode authorizes nodes by IAM role via an access entry. That
+# entry must exist BEFORE an EC2 instance using the role tries to join, or
+# it comes up stuck NotReady with no obvious error surfaced anywhere. The
+# role is created first (its own module, no dependency on the node group),
+# the access entry next (depends on both the cluster and the role), and only
+# then the node group itself (explicit depends_on the access entry - just
+# referencing the role's ARN as an input is NOT enough to guarantee ordering,
+# since the access entry and the node group would otherwise have no edge
+# between them and could apply in parallel).
+module "eks_node_role_platform" {
+  source    = "../../modules/eks-node-role"
+  env       = var.env
+  role_name = "platform"
+}
+
+resource "aws_eks_access_entry" "platform_nodes" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = module.eks_node_role_platform.role_arn
+  type          = "EC2_LINUX"
+}
+
+# ── Managed Node Group: baseline platform pool ──────────────────────────────
+# Runs ArgoCD, cilium-operator, coredns, cert-manager, external-secrets, etc.
+# Untainted - this is where everything lands by default. Workload pods
+# (fastapi-app, postgresql) don't run on hub at all; hub is control-plane-only
+# for the fleet, same division of responsibility as before.
+module "eks_node_group_platform" {
+  source          = "../../modules/eks-node-group"
+  env             = var.env
+  cluster_name    = module.eks.cluster_name
+  node_group_name = "platform"
+  node_role_arn   = module.eks_node_role_platform.role_arn
+  subnet_ids      = module.vpc.private_subnet_ids
+  instance_types  = [var.master_instance_type, var.worker_instance_type]
+  desired_size    = var.worker_desired
+  min_size        = var.worker_min
+  max_size        = var.worker_max
+  disk_size       = var.worker_volume_size
+
+  depends_on = [aws_eks_access_entry.platform_nodes]
+}
+
+# ── CI access entry ──────────────────────────────────────────────────────────
+# No node-join race here (this grants a human/CI IAM role kubectl/helm
+# access, not something an EC2 instance needs at boot), so no depends_on
+# ordering is required - but declared after aws_iam_role.argocd_registration_ci
+# further down this file, which Terraform resolves regardless of file order.
+resource "aws_eks_access_entry" "ci" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = aws_iam_role.argocd_registration_ci.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "ci_admin" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = aws_iam_role.argocd_registration_ci.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.ci]
+}
+
+# ── IRSA: register this cluster's OIDC issuer + workload roles ─────────────
+# Same module as before, but oidc_issuer_url now comes straight from EKS
+# itself (module.eks.cluster_oidc_issuer_url) instead of the hand-rolled
+# modules/oidc-bucket + master's self-publish step - that whole mechanism
+# (aws_s3_bucket public-read discovery docs, the "publish OIDC discovery"
+# step in master_init.sh.tpl) is deleted; EKS hosts its own OIDC endpoint.
+#
+# Roles that used to need DIRECT env-var injection (cilium-operator,
+# aws-cloud-controller-manager) because pod-identity-webhook and ArgoCD
+# didn't exist yet at day-0 no longer need that special-casing - EKS's
+# control plane runs its own IRSA mutating webhook unconditionally, so every
+# role below just becomes a normal ServiceAccount annotation from wave 0.
+module "irsa" {
+  source          = "../../modules/irsa"
+  cluster_prefix  = var.env
+  oidc_issuer_url = module.eks.cluster_oidc_issuer_url
+
+  roles = {
+    ebs-csi-controller = {
+      service_account = "ebs-csi-controller-sa"
+      namespace       = "kube-system"
+      policy_json     = local.ebs_csi_irsa_policy
+    }
+    external-secrets = {
+      service_account = "external-secrets"
+      namespace       = "external-secrets"
+      policy_json     = local.eso_irsa_policy_hub
+    }
+    loki = {
+      service_account = "loki"
+      namespace       = "observability"
+      policy_json     = local.loki_irsa_policy
+    }
+    tempo = {
+      service_account = "tempo"
+      namespace       = "observability"
+      policy_json     = local.tempo_irsa_policy
+    }
+    cloud-controller-manager = {
+      service_account = "cloud-controller-manager"
+      namespace       = "kube-system"
+      policy_json     = local.ccm_irsa_policy
+    }
+    cilium-operator = {
+      service_account = "cilium-operator"
+      namespace       = "kube-system"
+      policy_json     = local.cilium_operator_irsa_policy
+    }
   }
 }
 
-data "aws_partition" "current" {}
-
-# ── IRSA / OIDC ─────────────────────────────────────────────────────────────
-# This cluster's own prefix inside the shared bucket from global/network.
-# cluster_prefix intentionally reuses var.env (e.g. "hub-dev") - same value
-# already used as modules/k8s's "env" and as the S3 key prefix for the
-# join-token SSM parameter, so there's one name for "this cluster" across
-# the whole repo, not a second parallel identifier to keep in sync.
+# ── IAM policy documents (unchanged from the kubeadm version) ──────────────
 locals {
-  oidc_s3_prefix  = var.env
-  oidc_issuer_url = "https://${data.terraform_remote_state.network.outputs.oidc_bucket_regional_domain_name}/${local.oidc_s3_prefix}"
-
-  # ── IRSA: External Secrets Operator ─────────────────────────────────────────
-  # Combines BOTH of ESO's previous credential paths on hub into one role
-  # (one ESO controller Pod/SA backs both SecretStores):
-  #   - argocd-clusters-store used a static "eso-secrets-reader" IAM user +
-  #     aws-creds Secret, seeded by the now-removed
-  #     .github/scripts/bootstrap-eso-secret.sh.tpl
-  #   - clustermesh-secrets-store relied on the node's EC2 instance-profile
-  #     role (install_clustermesh_ca_push on modules/ec2, now removed)
   eso_irsa_policy_hub = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -83,13 +226,6 @@ locals {
     ]
   })
 
-  # EBS CSI pilot policy - deliberately a straight copy of modules/ec2's
-  # worker_ebs statements (same tag-scoping pattern), just attached to a
-  # role trusted only for the aws-ebs-csi-driver controller ServiceAccount
-  # instead of the whole node. Once this is verified working (see
-  # modules/irsa/README.md's "Adding a new workload" checklist), the
-  # equivalent statements get removed from modules/ec2/main.tf's
-  # worker_ebs policy - see the TODO left there.
   ebs_csi_irsa_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -133,13 +269,9 @@ locals {
         }
       },
       {
-        Sid    = "EBSMutateVolumeOnlyResourcesTaggedForThisCluster"
-        Effect = "Allow"
-        Action = [
-          "ec2:DeleteVolume",
-          "ec2:DeleteSnapshot",
-          "ec2:ModifyVolume"
-        ]
+        Sid      = "EBSMutateVolumeOnlyResourcesTaggedForThisCluster"
+        Effect   = "Allow"
+        Action   = ["ec2:DeleteVolume", "ec2:DeleteSnapshot", "ec2:ModifyVolume"]
         Resource = "arn:aws:ec2:*:*:volume/*"
         Condition = {
           StringEquals = { "aws:ResourceTag/ebs.csi.aws.com/cluster" = "true" }
@@ -160,35 +292,27 @@ locals {
   loki_irsa_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "LokiOwnBucketOnly"
-      Effect = "Allow"
-      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-      Resource = [
-        "arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}",
-        "arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}/*"
-      ]
+      Sid      = "LokiOwnBucketOnly"
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = ["arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}", "arn:aws:s3:::${module.s3.bucket_ids["loki-s3-phuoctd6"]}/*"]
     }]
   })
 
   tempo_irsa_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "TempoOwnBucketOnly"
-      Effect = "Allow"
-      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-      Resource = [
-        "arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}",
-        "arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}/*"
-      ]
+      Sid      = "TempoOwnBucketOnly"
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = ["arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}", "arn:aws:s3:::${module.s3.bucket_ids["tempo-s3-phuoctd6"]}/*"]
     }]
   })
 
-  # ── IRSA: AWS Cloud Controller Manager ──────────────────────────────────
-  # Straight copy of modules/ec2's master_ccm_policy statements, attached to
-  # a role trusted only for the aws-cloud-controller-manager ServiceAccount
-  # (kube-system) instead of the whole master node role. CCM's own pod is
-  # what actually calls these APIs, so it never needed the rest of the
-  # master role's permissions (SSM write, Cluster Autoscaler, etc).
+  # aws-cloud-controller-manager kept self-managed (not the EKS-implicit
+  # provider) so LoadBalancer-type Services created by Cilium's Gateway API
+  # continue to get real NLBs the exact same way they did pre-migration -
+  # EKS does not run this for you automatically.
   ccm_irsa_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -196,14 +320,9 @@ locals {
         Sid    = "ReadOnlyDescribe"
         Effect = "Allow"
         Action = [
-          "ec2:DescribeInstances",
-          "ec2:DescribeRegions",
-          "ec2:DescribeRouteTables",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeVolumes",
-          "ec2:DescribeAvailabilityZones",
-          "ec2:DescribeInstanceTopology"
+          "ec2:DescribeInstances", "ec2:DescribeRegions", "ec2:DescribeRouteTables",
+          "ec2:DescribeSecurityGroups", "ec2:DescribeSubnets", "ec2:DescribeVolumes",
+          "ec2:DescribeAvailabilityZones", "ec2:DescribeInstanceTopology"
         ]
         Resource = "*"
       },
@@ -213,63 +332,40 @@ locals {
         Action   = "ec2:CreateSecurityGroup"
         Resource = "*"
         Condition = {
-          StringEquals = {
-            "aws:RequestTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
-          }
+          StringEquals = { "aws:RequestTag/kubernetes.io/cluster/${var.cluster_name}" = "owned" }
         }
       },
       {
         Sid    = "MutateOnlyResourcesTaggedForThisCluster"
         Effect = "Allow"
         Action = [
-          "ec2:CreateTags",
-          "ec2:DeleteSecurityGroup",
-          "ec2:ModifyInstanceAttribute",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress"
+          "ec2:CreateTags", "ec2:DeleteSecurityGroup", "ec2:ModifyInstanceAttribute",
+          "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"
         ]
         Resource = "*"
         Condition = {
-          StringEquals = {
-            "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned"
-          }
+          StringEquals = { "aws:ResourceTag/kubernetes.io/cluster/${var.cluster_name}" = "owned" }
         }
       },
       {
         Sid    = "ELBManageForCCMProvisionedLoadBalancers"
         Effect = "Allow"
         Action = [
-          "elasticloadbalancing:CreateLoadBalancer",
-          "elasticloadbalancing:DeleteLoadBalancer",
-          "elasticloadbalancing:DescribeLoadBalancers",
-          "elasticloadbalancing:DescribeLoadBalancerAttributes",
-          "elasticloadbalancing:ModifyLoadBalancerAttributes",
-          "elasticloadbalancing:CreateListener",
-          "elasticloadbalancing:DeleteListener",
-          "elasticloadbalancing:DescribeListeners",
-          "elasticloadbalancing:ModifyListener",
-          "elasticloadbalancing:CreateTargetGroup",
-          "elasticloadbalancing:DeleteTargetGroup",
-          "elasticloadbalancing:DescribeTargetGroups",
-          "elasticloadbalancing:DescribeTargetGroupAttributes",
-          "elasticloadbalancing:ModifyTargetGroup",
-          "elasticloadbalancing:ModifyTargetGroupAttributes",
-          "elasticloadbalancing:RegisterTargets",
-          "elasticloadbalancing:DeregisterTargets",
-          "elasticloadbalancing:DescribeTargetHealth",
-          "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
-          "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
-          "elasticloadbalancing:CreateLoadBalancerListeners",
-          "elasticloadbalancing:DeleteLoadBalancerListeners",
-          "elasticloadbalancing:ConfigureHealthCheck",
-          "elasticloadbalancing:AttachLoadBalancerToSubnets",
-          "elasticloadbalancing:DetachLoadBalancerFromSubnets",
-          "elasticloadbalancing:ApplySecurityGroupsToLoadBalancer",
-          "elasticloadbalancing:SetLoadBalancerPoliciesOfListener",
-          "elasticloadbalancing:CreateLoadBalancerPolicy",
-          "elasticloadbalancing:AddTags",
-          "elasticloadbalancing:RemoveTags",
-          "elasticloadbalancing:DescribeTags",
+          "elasticloadbalancing:CreateLoadBalancer", "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeLoadBalancerAttributes",
+          "elasticloadbalancing:ModifyLoadBalancerAttributes", "elasticloadbalancing:CreateListener",
+          "elasticloadbalancing:DeleteListener", "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:ModifyListener", "elasticloadbalancing:CreateTargetGroup",
+          "elasticloadbalancing:DeleteTargetGroup", "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetGroupAttributes", "elasticloadbalancing:ModifyTargetGroup",
+          "elasticloadbalancing:ModifyTargetGroupAttributes", "elasticloadbalancing:RegisterTargets",
+          "elasticloadbalancing:DeregisterTargets", "elasticloadbalancing:DescribeTargetHealth",
+          "elasticloadbalancing:RegisterInstancesWithLoadBalancer", "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+          "elasticloadbalancing:CreateLoadBalancerListeners", "elasticloadbalancing:DeleteLoadBalancerListeners",
+          "elasticloadbalancing:ConfigureHealthCheck", "elasticloadbalancing:AttachLoadBalancerToSubnets",
+          "elasticloadbalancing:DetachLoadBalancerFromSubnets", "elasticloadbalancing:ApplySecurityGroupsToLoadBalancer",
+          "elasticloadbalancing:SetLoadBalancerPoliciesOfListener", "elasticloadbalancing:CreateLoadBalancerPolicy",
+          "elasticloadbalancing:AddTags", "elasticloadbalancing:RemoveTags", "elasticloadbalancing:DescribeTags",
           "ec2:DescribeVpcs"
         ]
         Resource = "*"
@@ -277,11 +373,6 @@ locals {
     ]
   })
 
-  # ── IRSA: Cilium ENI-mode IPAM (cilium-operator) ────────────────────────
-  # Straight copy of modules/ec2's cilium_eni statements. cilium-operator
-  # runs as a single Deployment/ServiceAccount (kube-system), same shape as
-  # EBS CSI's controller - see the TODO already sitting on
-  # modules/ec2/main.tf's cilium_eni block.
   cilium_operator_irsa_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -289,15 +380,9 @@ locals {
         Sid    = "CiliumENIReadOnlyDescribe"
         Effect = "Allow"
         Action = [
-          "ec2:DescribeSubnets",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeVpcPeeringConnections",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeInstances",
-          "ec2:DescribeInstanceTypes",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DescribeRouteTables",
-          "ec2:DescribeTags"
+          "ec2:DescribeSubnets", "ec2:DescribeVpcs", "ec2:DescribeVpcPeeringConnections",
+          "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes",
+          "ec2:DescribeNetworkInterfaces", "ec2:DescribeRouteTables", "ec2:DescribeTags"
         ]
         Resource = "*"
       },
@@ -305,15 +390,10 @@ locals {
         Sid    = "CiliumENILifecycle"
         Effect = "Allow"
         Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:AttachNetworkInterface",
-          "ec2:DetachNetworkInterface",
-          "ec2:DeleteNetworkInterface",
-          "ec2:ModifyNetworkInterfaceAttribute",
-          "ec2:AssignPrivateIpAddresses",
-          "ec2:UnassignPrivateIpAddresses",
-          "ec2:AssignIpv6Addresses",
-          "ec2:UnassignIpv6Addresses"
+          "ec2:CreateNetworkInterface", "ec2:AttachNetworkInterface", "ec2:DetachNetworkInterface",
+          "ec2:DeleteNetworkInterface", "ec2:ModifyNetworkInterfaceAttribute",
+          "ec2:AssignPrivateIpAddresses", "ec2:UnassignPrivateIpAddresses",
+          "ec2:AssignIpv6Addresses", "ec2:UnassignIpv6Addresses"
         ]
         Resource = "*"
       },
@@ -330,139 +410,23 @@ locals {
   })
 }
 
-# ── VPC ───────────────────────────────────────────────────────────────────────
-module "vpc" {
-  source                     = "../../modules/vpc"
-  env                        = var.env
-  vpc_cidr                   = var.vpc_cidr
-  public_subnet_cidrs        = var.public_subnet_cidrs
-  private_subnet_cidrs       = var.private_subnet_cidrs
-  region                     = var.region
-  cluster_name               = var.cluster_name
-  enable_karpenter_discovery = false
-}
-
-# ── Baked k8s base AMI (built by Packer + Ansible - see /packer) ─────────────
-module "ami" {
-  source = "../../modules/ami"
-}
-
-# ── Transit Gateway attachment - connects this VPC to every spoke VPC ────────
-module "tgw_attachment" {
-  source                = "../../modules/tgw-attachment"
-  env                   = var.env
-  transit_gateway_id    = data.terraform_remote_state.network.outputs.transit_gateway_id
-  vpc_id                = module.vpc.vpc_id
-  attachment_subnet_ids = module.vpc.private_subnet_ids
-  route_table_ids       = [module.vpc.private_route_table_id, module.vpc.public_route_table_id]
-  peer_cidr_blocks      = var.spoke_vpc_cidrs
-}
-
-# ── IRSA: register this cluster's OIDC issuer + workload roles ──────────────
-module "irsa" {
-  source          = "../../modules/irsa"
-  cluster_prefix  = local.oidc_s3_prefix
-  oidc_issuer_url = local.oidc_issuer_url
-
-  roles = {
-    ebs-csi-controller = {
-      service_account = "ebs-csi-controller-sa"
-      namespace       = "kube-system"
-      policy_json     = local.ebs_csi_irsa_policy
-    }
-    external-secrets = {
-      service_account = "external-secrets"
-      namespace       = "external-secrets"
-      policy_json     = local.eso_irsa_policy_hub
-    }
-    loki = {
-      service_account = "loki"
-      namespace       = "observability"
-      policy_json     = local.loki_irsa_policy
-    }
-    tempo = {
-      service_account = "tempo"
-      namespace       = "observability"
-      policy_json     = local.tempo_irsa_policy
-    }
-    cloud-controller-manager = {
-      service_account = "cloud-controller-manager"
-      namespace       = "kube-system"
-      policy_json     = local.ccm_irsa_policy
-    }
-    cilium-operator = {
-      service_account = "cilium-operator"
-      namespace       = "kube-system"
-      policy_json     = local.cilium_operator_irsa_policy
-    }
-  }
-}
-
-# ── K8s bootstrap scripts (kubeadm init + CNI only) ───────────────────────
-module "k8s" {
-  source                   = "../../modules/k8s"
-  k8s_version              = var.k8s_version
-  env                      = var.env
-  vpc_cidr_supernet        = var.vpc_cidr_supernet
-  install_cni_ccm          = true # Argo CD runs here - can't install its own dependency
-  oidc_issuer_url          = local.oidc_issuer_url
-  oidc_s3_bucket           = data.terraform_remote_state.network.outputs.oidc_bucket_id
-  oidc_s3_prefix           = local.oidc_s3_prefix
-  aws_ccm_role_arn         = module.irsa.role_arns["cloud-controller-manager"]
-  cilium_operator_role_arn = module.irsa.role_arns["cilium-operator"]
-}
-
-# ── EC2: master node + shared IAM/SG resources ────────────────────────────────
-module "ec2" {
-  source               = "../../modules/ec2"
-  env                  = var.env
-  vpc_id               = module.vpc.vpc_id
-  vpc_cidr             = var.vpc_cidr
-  private_subnet_ids   = module.vpc.private_subnet_ids
-  master_instance_type = var.master_instance_type
-  master_private_ip    = var.master_private_ip
-  master_volume_size   = var.master_volume_size
-  cluster_name         = var.cluster_name
-  ami_id               = module.ami.ami_id
-  s3_bucket_arns       = module.s3.bucket_arns
-  vpc_cidr_supernet    = var.vpc_cidr_supernet
-  clustermesh_nodeport = var.clustermesh_nodeport
-  oidc_bucket_arn      = data.terraform_remote_state.network.outputs.oidc_bucket_arn
-  oidc_s3_prefix       = local.oidc_s3_prefix
-}
-
-# ── ASG: worker node Auto Scaling Group ───────────────────────────────────────
-module "asg" {
-  source                           = "../../modules/asg"
-  env                              = var.env
-  cluster_name                     = var.cluster_name
-  worker_instance_type             = var.worker_instance_type
-  private_subnet_ids               = module.vpc.private_subnet_ids
-  worker_sg_id                     = module.ec2.worker_sg_id
-  worker_iam_instance_profile_name = module.ec2.worker_iam_instance_profile_name
-  k8s_worker_bootstrap             = module.k8s.worker_userdata
-  worker_min                       = var.worker_min
-  worker_max                       = var.worker_max
-  worker_desired                   = var.worker_desired
-  worker_volume_size               = var.worker_volume_size
-  ami_id                           = module.ami.ami_id
-
-  depends_on = [module.vpc]
-}
-
-# ── S3 Buckets ─────────────────────────────────────────────────────────────────
+# ── S3 Buckets (Loki/Tempo) - unchanged ─────────────────────────────────────
 module "s3" {
   source       = "../../modules/s3"
   bucket_names = var.bucket_names
   env          = var.env
 }
 
-# ── IAM role assumed by the verify-spoke-registration.yml GitHub Actions workflow ─
+# ── CI role for GitHub Actions to talk to the cluster directly ─────────────
+# Replaces the old argocd_registration_ci role's SSM-send-command permissions
+# entirely - there's no master instance to SSM into anymore. This role is
+# now granted an EKS access entry (see aws_eks_access_entry.ci above) with
+# AmazonEKSAdminPolicy, so CI runs `aws eks update-kubeconfig` + kubectl/helm
+# directly. Scope this down from Admin once you know exactly which
+# operations CI needs (installing ArgoCD, checking registration secrets).
 data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 }
-
-data "aws_caller_identity" "current" {}
 
 resource "aws_iam_role" "argocd_registration_ci" {
   name = "${var.env}-argocd-registration-ci"
@@ -489,38 +453,21 @@ resource "aws_iam_role_policy" "argocd_registration_ci" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "FindHubMaster"
+        Sid      = "DescribeClusterForKubeconfig"
         Effect   = "Allow"
-        Action   = ["ec2:DescribeInstances"]
-        Resource = "*"
+        Action   = ["eks:DescribeCluster"]
+        Resource = module.eks.cluster_arn
       },
       {
-        Sid    = "RunOnHubMasterOnly"
-        Effect = "Allow"
-        Action = ["ssm:SendCommand"]
-        Resource = [
-          module.ec2.master_instance_arn,
-          "arn:aws:ssm:${var.region}::document/AWS-RunShellScript"
-        ]
-      },
-      {
-        Sid      = "ReadCommandResults"
+        Sid      = "ReadSpokeRegistrationSecrets"
         Effect   = "Allow"
-        Action   = ["ssm:GetCommandInvocation", "ssm:ListCommands", "ssm:ListCommandInvocations"]
-        Resource = "*"
-      },
-      {
-        Sid    = "ReadSpokeRegistrationSecrets"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:GetSecretValue"
-        ]
+        Action   = ["secretsmanager:DescribeSecret", "secretsmanager:GetSecretValue"]
         Resource = "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:argocd-clusters/*"
       }
     ]
   })
 }
+
 output "argocd_registration_ci_role_arn" {
   value = aws_iam_role.argocd_registration_ci.arn
 }

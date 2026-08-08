@@ -114,3 +114,9 @@ variable "clustermesh_nodeport" {
   type        = number
   default     = 32379
 }
+
+variable "eks_cluster_version" {
+  description = "EKS control-plane Kubernetes version, e.g. \"1.31\". Independent from k8s_version - EKS's supported version list moves on its own schedule."
+  type        = string
+  default     = "1.31"
+}
