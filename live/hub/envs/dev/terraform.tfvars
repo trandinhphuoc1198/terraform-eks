@@ -14,13 +14,11 @@ spoke_vpc_cidrs = ["10.1.0.0/16"]
 
 master_instance_type = "c7i-flex.large"
 worker_instance_type = "m7i-flex.large"
-master_private_ip    = "10.0.11.10"
 
 worker_min         = 1
 worker_max         = 3
 worker_desired     = 2
 worker_volume_size = 20
-master_volume_size = 20
 
 k8s_version = "1.33.2"
 

@@ -6,7 +6,6 @@ on:
       - "**/*.tf"
       - "**/*.tfvars"
       - "**/*.pkr.hcl"
-      - "packer/ansible/**"
       - ".tflint.hcl"
       - ".github/workflows/terraform.yml"
   push:
@@ -67,39 +66,6 @@ jobs:
       - name: tflint run
         run: tflint --config ${{ github.workspace }}/.tflint.hcl
         working-directory: ${{ matrix.root }}
-
-  # Static checks only - no AWS credentials in CI, so this can't actually
-  # launch the build instance. `packer validate` catches HCL/syntax errors;
-  # `ansible-lint` catches obvious playbook mistakes before merge.
-  packer-validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: hashicorp/setup-packer@main
-        with:
-          version: "1.11.0"
-      - name: packer init
-        working-directory: packer
-        run: packer init .
-      - name: packer fmt (check only)
-        working-directory: packer
-        run: packer fmt -check -diff .
-      - name: packer validate
-        working-directory: packer
-        run: |
-          packer validate \
-            -var="subnet_id=subnet-00000000000000000" \
-            -var="vpc_id=vpc-00000000000000000" \
-            .
-      - name: Install ansible-lint
-        run: pip install --break-system-packages ansible-lint
-
-      - name: Install Ansible collections
-        working-directory: packer/ansible
-        run: ansible-galaxy collection install -r requirements.yml
-      - name: ansible-lint
-        working-directory: packer/ansible
-        run: ansible-lint playbook.yml
 
   security-scan:
     runs-on: ubuntu-latest

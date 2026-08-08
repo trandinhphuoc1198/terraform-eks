@@ -56,17 +56,6 @@ variable "master_instance_type" {
   type        = string
 }
 
-variable "master_private_ip" {
-  description = "Optional fixed private IP for the master node (e.g. 10.1.1.10); if null, an IP is assigned automatically"
-  type        = string
-  default     = null
-}
-
-variable "master_volume_size" {
-  description = "Root EBS volume size in GB for the master node"
-  type        = number
-  default     = 20
-}
 
 # ── ASG / Workers ─────────────────────────────────────────────────────────────
 variable "worker_instance_type" {
@@ -97,23 +86,6 @@ variable "worker_volume_size" {
 }
 
 # ── Kubernetes ────────────────────────────────────────────────────────────────
-variable "k8s_version" {
-  description = "Kubernetes minor version (e.g. 1.29)"
-  type        = string
-  default     = "1.29"
-}
-
-variable "vpc_cidr_supernet" {
-  description = "Fleet-wide VPC-CIDR supernet - lets the clustermesh-apiserver NodePort SG rule admit traffic from any cluster without per-peer rules"
-  type        = string
-  default     = "10.0.0.0/8"
-}
-
-variable "clustermesh_nodeport" {
-  description = "NodePort the clustermesh-apiserver Service listens on"
-  type        = number
-  default     = 32379
-}
 
 variable "eks_cluster_version" {
   description = "EKS control-plane Kubernetes version, e.g. \"1.31\". Independent from k8s_version - EKS's supported version list moves on its own schedule."

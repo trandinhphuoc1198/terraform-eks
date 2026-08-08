@@ -1,0 +1,28 @@
+name: "Connect kubectl to an EKS cluster"
+description: >
+  Points kubectl at an EKS cluster's API server via `aws eks update-kubeconfig`.
+  Replaces the old .github/actions/ssm-run-script composite action entirely -
+  there's no master instance to tunnel into anymore, the API server is
+  directly reachable (gated by IAM auth + the access entries granted in
+  live/{hub,spoke}/main.tf, not by SSM/network position). The calling job
+  must already have AWS credentials configured (aws-actions/configure-aws-credentials)
+  with a role that holds an EKS access entry on the target cluster - see
+  live/hub/main.tf's `aws_eks_access_entry.ci` / live/spoke's equivalent.
+
+inputs:
+  cluster-name:
+    description: "EKS cluster name, e.g. from `terraform output -raw cluster_name`"
+    required: true
+  aws-region:
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        aws eks update-kubeconfig \
+          --name "${{ inputs.cluster-name }}" \
+          --region "${{ inputs.aws-region }}"
+        echo "=== Verifying API server is reachable ==="
+        kubectl get --raw='/readyz' && echo " -> apiserver ready"

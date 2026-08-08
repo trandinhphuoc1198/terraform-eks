@@ -1,17 +1,16 @@
 name: deploy-hub
 
-# Deploys/updates the hub cluster ONLY: live/hub terraform apply, kubeadm
-# bootstrap, then Argo CD install. Does not touch live/spoke and does not
-# re-apply global/network (it only reads that state via
-# terraform_remote_state - global/network must already exist; run
-# deploy-network.yml first if this is a brand-new environment).
+# Deploys/updates the hub cluster ONLY: live/hub terraform apply (now
+# creates an EKS cluster + platform Managed Node Group instead of a master
+# EC2 instance + ASG), Cilium/CCM bootstrap, then Argo CD install. Does not
+# touch live/spoke and does not re-apply global/network.
 #
-# Run this on its own for any hub-only change (instance type, worker
-# counts, apps map, cert ARN, etc). Use deploy-all.yml only for first-time
-# bring-up of a whole new environment.
-#
-# The actual terraform init/plan/apply steps live in the shared
-# terraform-apply.yml reusable workflow.
+# k8s-cluster-bootstrap.yml and k8s-bootstrap-argocd.yml's CALL INTERFACE
+# here is unchanged from the kubeadm version - only their internals changed
+# (aws eks update-kubeconfig instead of SSM send-command). What DID change
+# in this file: terraform_output_name/outputs, so deploy-all.yml can pass
+# this cluster's real EKS name to verify-spoke-registration.yml without
+# re-deriving it from a naming convention.
 
 on:
   workflow_dispatch:
@@ -32,6 +31,10 @@ on:
     secrets:
       AWS_DEPLOY_ROLE_ARN:
         required: true
+    outputs:
+      cluster_name:
+        description: "Hub's EKS cluster name - needed by verify-spoke-registration.yml / k8s-deregister-from-hub.yml"
+        value: ${{ jobs.deploy-hub.outputs.terraform_output_value }}
 
 permissions:
   id-token: write
@@ -46,11 +49,13 @@ jobs:
       working_directory: live/hub
       environment: ${{ inputs.environment }}
       extra_tf_vars: "network_state_key=global/network/${{ inputs.environment }}/terraform.tfstate"
+      terraform_output_name: cluster_name
       aws_region: ap-northeast-1
     secrets:
       AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
-  # ── 2. kubeadm init + CNI on the hub master ──────────────────────────────
+  # ── 2. Cilium + AWS CCM on the hub (solves the same chicken-and-egg
+  #      problem the old master's inline bootstrap solved) ─────────────────
   bootstrap-cluster-hub:
     name: "bootstrap cluster (hub, ${{ inputs.environment }})"
     needs: deploy-hub

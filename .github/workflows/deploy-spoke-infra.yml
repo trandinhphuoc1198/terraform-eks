@@ -1,23 +1,15 @@
 name: deploy-spoke-infra
 
-# Spoke infra ONLY: terraform apply, kubeadm bootstrap, and pushing the
+# Spoke infra ONLY: terraform apply (EKS cluster + platform Managed Node
+# Group + Karpenter node role), CNI reachability check, and pushing the
 # argocd-manager registration token to Secrets Manager. Deliberately stops
-# there - it does NOT verify the hub's Argo CD picked up the registration,
-# because that verification (verify-spoke-registration.yml) requires the hub's
-# master instance to exist and its Argo CD/ESO to be running, which this
-# workflow has no dependency on and shouldn't wait for.
+# there - see deploy-spoke.yml for the full chain including verification.
 #
-# This split exists so deploy-all.yml can run this in parallel with
-# deploy-hub.yml (spoke's terraform state has no dependency on hub's -
-# hub_vpc_cidr is a plain tfvar, not a remote-state read), then gate the
-# final verify-spoke-registration.yml verification on both finishing.
-#
-# For a single day-2 spoke change where you just want the full chain
-# (infra -> bootstrap -> register -> verify) in one run, use deploy-spoke.yml
-# instead - it calls this same infra chain plus the verify step, sequentially.
-#
-# The actual terraform init/plan/apply steps live in the shared
-# terraform-apply.yml reusable workflow.
+# CHANGED from the kubeadm version: the register-with-hub-spoke job no
+# longer passes a `cluster_name` input - k8s-register-with-hub.yml now
+# re-derives it itself via `terraform output -raw cluster_name` (it already
+# needs to re-run `terraform init` to connect kubectl to the cluster, so
+# there was no reason to thread the value through as a separate input).
 
 on:
   workflow_dispatch:
@@ -77,7 +69,9 @@ jobs:
     secrets:
       AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
-  # ── 2. kubeadm init + CNI on the spoke master ────────────────────────────
+  # ── 2. verify the spoke's apiserver is reachable ─────────────────────────
+  # CNI itself is installed later by the hub's ArgoCD once registration
+  # completes (step 3) - this just confirms the control plane is up.
   bootstrap-cluster-spoke:
     name: "bootstrap cluster (spoke, ${{ inputs.environment }})"
     needs: deploy-spoke
@@ -89,9 +83,7 @@ jobs:
       install_cni_ccm: false
     secrets: inherit
 
-  # ── 3. push argocd-manager token to Secrets Manager + rotation timer ────
-  # Only touches Secrets Manager - no dependency on the hub cluster itself,
-  # so this is safe to run before or during the hub's own bring-up.
+  # ── 3. push argocd-manager token to Secrets Manager + schedule rotation ──
   register-with-hub-spoke:
     name: "register spoke with hub (secrets manager) - ${{ inputs.environment }}"
     needs: [bootstrap-cluster-spoke, deploy-spoke]
@@ -100,7 +92,6 @@ jobs:
       working_directory: ${{ inputs.spoke_dir }}
       environment: ${{ inputs.environment }}
       aws_region: ${{ vars.AWS_REGION }}
-      cluster_name: ${{ needs.deploy-spoke.outputs.terraform_output_value }}
       cluster_role: ${{ inputs.cluster_role }}
       env_name: spoke-${{ inputs.environment }}
     secrets: inherit
