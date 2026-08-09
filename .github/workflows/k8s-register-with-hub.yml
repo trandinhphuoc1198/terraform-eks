@@ -13,6 +13,22 @@ name: k8s-register-with-hub
 # different execution environment. If you'd rather not grant a scheduled
 # workflow standing AWS credentials, replace this with a token minted with
 # a longer duration and accept manual rotation instead.
+#
+# BUGFIX: the registration Secret pushed here MUST be keyed by the same
+# cluster identifier that (a) the CI IAM role's Secrets Manager resource
+# policy is scoped to (live/spoke/main.tf: argocd-clusters/${var.cluster_name}-*)
+# and (b) verify-spoke-registration.yml / k8s-deregister-from-hub.yml poll
+# and delete by (var.cluster_name, e.g. "spoke-dev-k8s"). This step
+# previously used the separate `env_name` input (e.g. "spoke-dev") to name
+# the pushed secret and the payload's "name" field - a different string
+# from var.cluster_name. That mismatch caused two failures: the IAM policy
+# denied the push (wrong resource pattern), and even if it hadn't,
+# verify-spoke-registration.yml would poll for a cluster-name label that
+# never matched what was actually pushed. Fixed below by using the real
+# EKS cluster name (steps.cluster.outputs.name, i.e. terraform output
+# cluster_name) as CLUSTER_NAME. `env_name` is kept as an input for
+# backward compatibility with existing callers and is now only used as an
+# informational tag on the secret.
 
 on:
   workflow_call:
@@ -32,7 +48,7 @@ on:
         type: string
         default: "workload"
       env_name:
-        description: "Full env value, e.g. spoke-dev - must match live/spoke's var.env"
+        description: "Informational only now (e.g. spoke-dev) - stamped as an 'Environment' tag on the pushed secret. The secret's identity/name comes from the real EKS cluster_name, not this value - see BUGFIX note above."
         type: string
         required: true
     secrets:
@@ -87,15 +103,19 @@ jobs:
             --serviceaccount=argocd-manager:argocd-manager \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      # Replaces the systemd-timer-driven push-argocd-registration.sh -
-      # mints a token, reads the cluster CA + real API endpoint straight
+      # Mints a token, reads the cluster CA + real API endpoint straight
       # from kubeconfig (populated by aws eks update-kubeconfig, so this is
-      # the EKS endpoint - no more "read the master's local IP" trick), and
-      # pushes {name, role, server, token, caData} to Secrets Manager.
+      # the EKS endpoint), and pushes {name, role, server, token, caData} to
+      # Secrets Manager under the REAL cluster name (steps.cluster.outputs.name)
+      # - not inputs.env_name. This is what verify-spoke-registration.yml's
+      # ExternalSecret-derived cluster-name label is matched against, and
+      # what live/spoke/main.tf's IAM resource pattern
+      # (argocd-clusters/${var.cluster_name}-*) actually authorizes.
       - name: Push registration to Secrets Manager
         env:
-          CLUSTER_NAME: ${{ inputs.env_name }}
+          CLUSTER_NAME: ${{ steps.cluster.outputs.name }}
           CLUSTER_ROLE: ${{ inputs.cluster_role }}
+          ENV_NAME: ${{ inputs.env_name }}
         run: |
           set -euo pipefail
           TOKEN=$(kubectl create token argocd-manager -n argocd-manager --duration=2160h)
@@ -118,5 +138,5 @@ jobs:
           aws secretsmanager create-secret \
             --name "$SECRET_NAME" \
             --secret-string "$PAYLOAD" \
-            --tags Key=ManagedBy,Value=github-actions Key=ClusterName,Value="$CLUSTER_NAME" Key=ClusterRole,Value="$CLUSTER_ROLE" Key=Purpose,Value=argocd-registration \
+            --tags Key=ManagedBy,Value=github-actions Key=ClusterName,Value="$CLUSTER_NAME" Key=ClusterRole,Value="$CLUSTER_ROLE" Key=Environment,Value="$ENV_NAME" Key=Purpose,Value=argocd-registration \
             --region "${{ inputs.aws_region }}"

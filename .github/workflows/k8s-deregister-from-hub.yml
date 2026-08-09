@@ -17,40 +17,33 @@ name: k8s-deregister-from-hub
 # argocd/clusters/<cluster_name>.yaml from the gitops repo yourself - that
 # is a deliberate, separate action from this workflow.
 #
-# What "race-free" means here: this deletes every ArgoCD Application
-# generated for this spoke (spokes/infra/**, spokes/workloads/**) with
-# `--cascade=foreground --wait`, which blocks until every child resource -
-# namespaces, Deployments, StatefulSets, and any standalone PVCs rendered
-# directly by a chart - is actually gone from the spoke, not just until the
-# Application object is marked Deleting. Only after that succeeds does it
-# remove the cluster's ExternalSecret + Secret, which is what every
-# spokes/ ApplicationSet's `clusters` generator uses to know this spoke
-# exists at all - while that's gone, nothing can recreate anything on the
-# spoke, for as long as this workflow's own run takes (the guarantee window
-# closes once root-clusters resyncs, see above).
+# All of .github/scripts/deregister-from-hub.sh.tpl's own logic (ordering,
+# race-freedom guarantees, excluded releases, etc.) is UNCHANGED - see that
+# script's header comment for the full rationale. Nothing about the
+# deregistration mechanic itself is EKS-specific; only how this workflow
+# gets kubectl pointed at the hub cluster changed.
+#
+# EKS REWRITE: this used to locate the hub's EC2 master by its Name tag and
+# run the script over `aws ssm send-command`. There is no master instance
+# anymore. This now locates the hub's EKS cluster by its `Env` tag (same
+# convention as verify-spoke-registration.yml - see that file's comment),
+# connects kubectl directly via `aws eks update-kubeconfig`, and runs the
+# script as a normal shell step on the runner instead of dispatching it
+# over SSM. The script's own `export KUBECONFIG=/home/ec2-user/.kube/config`
+# line is blanked out at render time (same sed pattern drain-cluster.yml
+# already uses for its four scripts) so it picks up the default kubeconfig
+# `aws eks update-kubeconfig` just wrote.
+#
+# Reuses the ARGOCD_REGISTRATION_ROLE_ARN role already granted in
+# live/hub/main.tf (argocd_registration_ci) - that role already holds an
+# EKS access entry + AmazonEKSAdminPolicy on the hub cluster, so no new
+# IAM/Terraform changes are needed. What actually happens on the hub
+# (kubectl delete applications/externalsecrets/secrets) is governed by
+# that access entry's cluster-admin grant, not by anything SSM-related.
 #
 # This intentionally does NOT tolerate failure: if deregistration can't be
 # confirmed, the job fails rather than letting the destroy pipeline proceed
 # into a drain step that might still be racing ArgoCD.
-#
-# PVCs created via a StatefulSet's volumeClaimTemplate (Prometheus, Tempo
-# ingester) are NOT deleted by ArgoCD's Application prune - Kubernetes
-# deliberately leaves those unowned so they survive pod/StatefulSet
-# recreation. After this workflow, they're simply idle (no pod holds them
-# anymore) - the existing drain-pvcs.sh.tpl step in destroy-spoke.yml is
-# what actually deletes them and triggers the EBS DeleteVolume calls, and
-# now runs risk-free.
-#
-# Reuses the ARGOCD_REGISTRATION_ROLE_ARN role already granted in
-# live/hub/main.tf for verify-spoke-registration.yml - no new IAM/Terraform
-# changes needed. That role already has everything this workflow needs:
-# ec2:DescribeInstances (find the hub master) and ssm:SendCommand /
-# GetCommandInvocation scoped to that instance. What actually happens on
-# the hub (kubectl delete applications/externalsecrets/secrets) is governed
-# by the cluster-admin kubeconfig already on that box, not by this IAM role.
-#
-# The actual send-command + poll loop lives in the shared
-# .github/actions/ssm-run-script composite action.
 
 on:
   workflow_call:
@@ -64,7 +57,7 @@ on:
         type: string
         required: true
       hub_env:
-        description: "Hub environment, e.g. hub-dev - used to locate the hub master by its Name tag"
+        description: "Hub's `env` tfvar, e.g. hub-dev - used to locate the hub's EKS cluster by its Env tag"
         type: string
         required: true
       aws_region:
@@ -102,41 +95,44 @@ jobs:
           role-to-assume: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
           aws-region: ${{ inputs.aws_region }}
 
-      - name: Locate hub master instance
-        id: hub_instance
+      # Same lookup as verify-spoke-registration.yml - see that file's
+      # comment for why this replaces "locate hub master instance by Name tag".
+      - name: Locate hub EKS cluster
+        id: hub_cluster
         run: |
-          ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ inputs.hub_env }}-k8s-master" "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" --output text)
-          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
-            echo "::error::No running hub master found for ${{ inputs.hub_env }}"
+          NAME=""
+          for c in $(aws eks list-clusters --query "clusters" --output text); do
+            ENV_TAG=$(aws eks describe-cluster --name "$c" --query "cluster.tags.Env" --output text 2>/dev/null || echo "None")
+            if [ "$ENV_TAG" = "${{ inputs.hub_env }}" ]; then
+              NAME="$c"
+              break
+            fi
+          done
+
+          if [ -z "$NAME" ]; then
+            echo "::error::No EKS cluster found tagged Env=${{ inputs.hub_env }}. Has live/hub been applied for this environment?"
             exit 1
           fi
-          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Resolved hub EKS cluster: $NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Connect kubectl to the hub cluster
+        uses: ./.github/actions/eks-connect
+        with:
+          cluster-name: ${{ steps.hub_cluster.outputs.name }}
+          aws-region: ${{ inputs.aws_region }}
 
       - name: Render deregistration script
         run: |
-          sed "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
+          sed \
+            -e "s|^export KUBECONFIG=.*|# KUBECONFIG left at its default (~/.kube/config) - already pointed at the hub cluster by aws eks update-kubeconfig|" \
+            -e "s|__CLUSTER_NAME__|${{ steps.cluster.outputs.name }}|g" \
             .github/scripts/deregister-from-hub.sh.tpl > /tmp/deregister-from-hub.sh
+          chmod +x /tmp/deregister-from-hub.sh
 
       - name: Deregister spoke from ArgoCD (blocks until fully confirmed gone)
-        id: deregister
-        uses: ./.github/actions/ssm-run-script
-        with:
-          instance-id: ${{ steps.hub_instance.outputs.id }}
-          script-path: /tmp/deregister-from-hub.sh
-          timeout-seconds: "900"
-          max-poll-attempts: "80"
-          poll-interval-seconds: "10"
+        run: /tmp/deregister-from-hub.sh
 
       - name: Explain failure
         if: failure()
-        run: echo "::error::Deregistration ended with a non-success status (${{ steps.deregister.outputs.status }}) - the cluster may still be tracked by ArgoCD. Not safe to proceed with destroy."
-
-      - name: Show deregistration output
-        if: always()
-        run: |
-          aws ssm get-command-invocation \
-            --command-id "${{ steps.deregister.outputs.cmd_id }}" \
-            --instance-id "${{ steps.hub_instance.outputs.id }}" \
-            --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}" || true
+        run: echo "::error::Deregistration ended in failure - the cluster may still be tracked by ArgoCD. Not safe to proceed with destroy."

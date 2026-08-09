@@ -1,7 +1,6 @@
 name: "Connect kubectl to an EKS cluster"
 description: >
   Points kubectl at an EKS cluster's API server via `aws eks update-kubeconfig`.
-  Replaces the old .github/actions/ssm-run-script composite action entirely -
   there's no master instance to tunnel into anymore, the API server is
   directly reachable (gated by IAM auth + the access entries granted in
   live/{hub,spoke}/main.tf, not by SSM/network position). The calling job

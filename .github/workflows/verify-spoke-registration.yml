@@ -1,17 +1,31 @@
 name: verify-spoke-registration
 
 # Terraform/CI's job stops at pushing {name, role, server, token, caData} to
-# Secrets Manager (see k8s-register-with-hub.yml / register-with-hub.sh.tpl)
-# - that's the one thing only CI can produce. Registering the cluster with
-# ArgoCD is a GitOps fact: add argocd/clusters/<name>.yaml to the gitops
-# repo once (copy an existing spoke file, rename) and ESO + root-clusters
-# do the rest, no CI step needed on every deploy.
+# Secrets Manager (see k8s-register-with-hub.yml) - that's the one thing
+# only CI can produce. Registering the cluster with ArgoCD is a GitOps fact:
+# add argocd/clusters/<name>.yaml to the gitops repo once (copy an existing
+# spoke file, rename) and ESO + root-clusters do the rest, no CI step
+# needed on every deploy.
 #
-# What THIS workflow does now: waits for that pipeline to actually finish
-# and fails the job loudly if it hasn't, instead of silently assuming
-# ESO will get there eventually. Verification now filters directly on the
-# cluster-name label (templated by the ExternalSecret from the pushed
-# secret's own "name" field) instead of listing by role and grepping.
+# What THIS workflow does: waits for that pipeline to actually finish and
+# fails the job loudly if it hasn't, instead of silently assuming ESO will
+# get there eventually.
+#
+# EKS REWRITE: this used to locate the hub's EC2 master by its Name tag and
+# poll via `aws ssm send-command`. There is no master instance anymore - the
+# hub is an EKS cluster. This now locates the hub's EKS cluster by its `Env`
+# tag (the same tag modules/eks stamps on every cluster it creates -
+# `tags = { Env = var.env, ... }`), connects kubectl to it directly via
+# `aws eks update-kubeconfig`, and polls the registration Secret with a
+# plain `kubectl get`. The CI role behind ARGOCD_REGISTRATION_ROLE_ARN
+# already holds an EKS access entry + AmazonEKSAdminPolicy on the hub
+# cluster (live/hub/main.tf's `aws_eks_access_entry.ci` /
+# `argocd_registration_ci`) - no new IAM/Terraform changes needed, same as
+# before, just a different mechanism (access entry, not an SSM IAM grant).
+#
+# Verification still filters directly on the cluster-name label, which the
+# ExternalSecret templates from the pushed secret's own "name" field - no
+# role-list + grep round trip.
 
 on:
   workflow_dispatch:
@@ -20,7 +34,7 @@ on:
         description: "Must match cluster_name in that spoke's tfvars, e.g. spoke-dev-k8s"
         required: true
       hub_env:
-        description: "Hub environment, e.g. hub-dev"
+        description: "Hub's `env` tfvar, e.g. hub-dev - used to locate the hub's EKS cluster by its Env tag"
         required: true
         default: "hub-dev"
       cluster_role:
@@ -64,6 +78,8 @@ jobs:
   verify-registration:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.ARGOCD_REGISTRATION_ROLE_ARN }}
@@ -75,40 +91,50 @@ jobs:
             --secret-id "argocd-clusters/${{ inputs.spoke_cluster_name }}" \
             --query "Name" --output text
 
-      - name: Locate hub master instance
-        id: instance
+      # Replaces "Locate hub master instance" (EC2 describe-instances by
+      # Name tag). Every EKS cluster this repo creates is tagged
+      # `Env = var.env` (modules/eks/main.tf) - the exact analog of the old
+      # master's `Name = ${env}-k8s-master` tag, just one level up (cluster,
+      # not instance).
+      - name: Locate hub EKS cluster
+        id: hub_cluster
         run: |
-          ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ inputs.hub_env }}-k8s-master" "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" --output text)
-          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
-            echo "::error::No running hub master found for ${{ inputs.hub_env }}"
+          NAME=""
+          for c in $(aws eks list-clusters --query "clusters" --output text); do
+            ENV_TAG=$(aws eks describe-cluster --name "$c" --query "cluster.tags.Env" --output text 2>/dev/null || echo "None")
+            if [ "$ENV_TAG" = "${{ inputs.hub_env }}" ]; then
+              NAME="$c"
+              break
+            fi
+          done
+
+          if [ -z "$NAME" ]; then
+            echo "::error::No EKS cluster found tagged Env=${{ inputs.hub_env }}. Has live/hub been applied for this environment?"
             exit 1
           fi
-          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Resolved hub EKS cluster: $NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
-      # Polls instead of applying anything - the ExternalSecret is git-owned
-      # (argocd/clusters/<name>.yaml) and ESO/root-clusters materialize the
-      # cluster Secret on their own schedule. This just confirms it happened.
-      #
-      # Filters directly on the cluster-name label, which the ExternalSecret
-      # now templates from the pushed secret's own "name" field - no more
-      # role-list + grep round trip.
+      - name: Connect kubectl to the hub cluster
+        uses: ./.github/actions/eks-connect
+        with:
+          cluster-name: ${{ steps.hub_cluster.outputs.name }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Polls directly instead of over SSM send-command/get-command-invocation -
+      # the runner already has a live kubeconfig pointed at the hub, no
+      # per-poll command dispatch needed.
       - name: Wait for ESO to materialize the cluster registration Secret
         run: |
           DEADLINE=$(( $(date +%s) + ${{ inputs.timeout_minutes }} * 60 ))
           while true; do
-            CMD_ID=$(aws ssm send-command \
-              --instance-ids "${{ steps.instance.outputs.id }}" \
-              --document-name "AWS-RunShellScript" \
-              --parameters 'commands=["KUBECONFIG=/home/ec2-user/.kube/config kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=cluster,cluster-name='"${{ inputs.spoke_cluster_name }}"' --no-headers 2>/dev/null || true"]' \
-              --query "Command.CommandId" --output text)
-            aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" || true
-            OUT=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ steps.instance.outputs.id }}" \
-              --query StandardOutputContent --output text)
+            OUT=$(kubectl -n argocd get secret \
+              -l "argocd.argoproj.io/secret-type=cluster,cluster-name=${{ inputs.spoke_cluster_name }}" \
+              --no-headers 2>/dev/null || true)
 
             if [ -n "$(echo "$OUT" | tr -d '[:space:]')" ]; then
-              echo "Registration confirmed: $OUT"
+              echo "Registration confirmed:"
+              echo "$OUT"
               exit 0
             fi
 
