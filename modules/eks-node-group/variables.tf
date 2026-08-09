@@ -80,3 +80,8 @@ variable "additional_security_group_ids" {
   type    = list(string)
   default = []
 }
+
+variable "cluster_security_group_id" {
+  description = "EKS's auto-created cluster security group (module.eks.cluster_security_group_id). Required once a launch template is used - specifying network_interfaces.security_groups on the launch template REPLACES EKS's default SG attachment, so this must be included explicitly or nodes lose control-plane connectivity."
+  type        = string
+}

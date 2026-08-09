@@ -51,6 +51,81 @@ resource "aws_security_group" "cluster_additional" {
   tags = { Name = "${var.env}-eks-cluster-additional-sg" }
 }
 
+# ── Cluster Mesh security group ─────────────────────────────────────────────
+# The EKS-auto-created cluster security group only covers intra-cluster
+# node<->control-plane traffic. Cluster Mesh needs node<->node traffic
+# from the PEER cluster's VPC (over the shared TGW) - WireGuard for the
+# encrypted overlay and the clustermesh-apiserver NodePort. Attached to
+# node ENIs via modules/eks-node-group's launch template, not to the
+# control plane itself (mirrors the old modules/ec2 worker SG rule that
+# opened these same two ports to vpc_cidr_supernet).
+resource "aws_security_group" "clustermesh" {
+  name        = "${var.env}-eks-clustermesh-sg"
+  description = "Cilium Cluster Mesh - WireGuard + clustermesh-apiserver from peer cluster CIDR(s)"
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = length(var.clustermesh_trusted_cidr_blocks) > 0 ? [1] : []
+    content {
+      description = "Cilium WireGuard overlay from peer cluster(s)"
+      from_port   = 51871
+      to_port     = 51871
+      protocol    = "udp"
+      cidr_blocks = var.clustermesh_trusted_cidr_blocks
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = length(var.clustermesh_trusted_cidr_blocks) > 0 ? [1] : []
+    content {
+      description = "clustermesh-apiserver NodePort from peer cluster(s)"
+      from_port   = var.clustermesh_nodeport
+      to_port     = var.clustermesh_nodeport
+      protocol    = "tcp"
+      cidr_blocks = var.clustermesh_trusted_cidr_blocks
+    }
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(
+    {
+      Name = "${var.env}-eks-clustermesh-sg"
+    },
+    var.enable_karpenter_discovery ? { "karpenter.sh/discovery" = var.cluster_name } : {}
+  )
+}
+
+resource "aws_security_group" "node_shared" {
+  name        = "${var.env}-eks-node-shared-sg"
+  description = "CCM-managed - NodePort ingress rules for LoadBalancer Services are added here at runtime, not by Terraform"
+  vpc_id      = var.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name                                        = "${var.env}-eks-node-shared-sg"
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+  }
+
+  # CCM adds/removes ingress rules directly via the AWS API as
+  # LoadBalancer Services come and go - Terraform must not fight that,
+  # same reasoning as the old modules/ec2 master/worker SGs.
+  lifecycle {
+    ignore_changes = [ingress, egress]
+  }
+}
+
 # ── EKS Cluster ──────────────────────────────────────────────────────────────
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
@@ -101,14 +176,17 @@ resource "aws_eks_addon" "coredns" {
   depends_on = [aws_eks_cluster.this]
 }
 
-# NOTE - deliberately NOT installing the vpc-cni, kube-proxy, or aws-ebs-csi-driver
-# EKS-managed addons here:
-#   - vpc-cni / kube-proxy: replaced entirely by Cilium (ArgoCD-managed,
-#     wave 10, same as the kubeadm setup).
-#   - aws-ebs-csi-driver: already an ArgoCD Application in this repo
-#     (argocd/{hub,spokes/infra}/50-aws-ebs-csi-driver.yaml) with its own
-#     IRSA role - keep that as the single source of truth rather than
-#     splitting ownership between Terraform and GitOps.
-#
-# Access entries (replacing the aws-auth ConfigMap model) live at the root -
-# see live/hub/main.tf and live/spoke/main.tf.
+# Tags EKS's own auto-created cluster security group so Karpenter's
+# EC2NodeClass can discover it by tag (karpenter.sh/discovery), same
+# convention as every other discovery tag in this repo (modules/vpc
+# subnets, the clustermesh SG below). This SG is created implicitly by
+# aws_eks_cluster - Terraform doesn't manage it as a first-class resource,
+# so aws_ec2_tag is used to tag an existing resource by ID rather than
+# owning its full lifecycle.
+resource "aws_ec2_tag" "cluster_sg_karpenter_discovery" {
+  count = var.enable_karpenter_discovery ? 1 : 0
+
+  resource_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  key         = "karpenter.sh/discovery"
+  value       = var.cluster_name
+}

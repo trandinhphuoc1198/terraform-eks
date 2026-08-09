@@ -1,8 +1,35 @@
+
+# ── Launch template ──────────────────────────────────────────────────────
+# Exists solely to attach extra security groups (Cluster Mesh, anything in
+# additional_security_group_ids) - AMI selection still comes from
+# var.ami_type on the node group below, NOT from image_id here, so EKS
+# keeps managing AMI upgrades the normal way.
+resource "aws_launch_template" "this" {
+  name_prefix = "${var.env}-${var.node_group_name}-"
+
+  network_interfaces {
+    security_groups = concat(
+      [var.cluster_security_group_id],
+      var.additional_security_group_ids
+    )
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "${var.env}-${var.node_group_name}-node" }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # ── Managed Node Group ───────────────────────────────────────────────────────
 # node_role_arn is created by the caller via modules/eks-node-role, with an
 # aws_eks_access_entry for it created BEFORE this resource (module-level
 # depends_on at the call site) - required so nodes can actually authenticate
 # to the cluster under EKS's API auth mode. See that module's header comment.
+
 resource "aws_eks_node_group" "this" {
   cluster_name    = var.cluster_name
   node_group_name = "${var.env}-${var.node_group_name}"
@@ -13,7 +40,10 @@ resource "aws_eks_node_group" "this" {
   capacity_type  = var.capacity_type
   instance_types = var.instance_types
 
-  disk_size = var.disk_size
+  launch_template {
+    id      = aws_launch_template.this.id
+    version = aws_launch_template.this.latest_version
+  }
 
   scaling_config {
     desired_size = var.desired_size

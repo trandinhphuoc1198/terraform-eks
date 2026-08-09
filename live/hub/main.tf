@@ -67,16 +67,18 @@ module "tgw_attachment" {
 # Actions runners can reach the API server directly; tighten once you've
 # decided between IAM-only trust vs a self-hosted runner inside the VPC.
 module "eks" {
-  source                  = "../../modules/eks"
-  env                     = var.env
-  cluster_name            = var.cluster_name
-  cluster_version         = var.eks_cluster_version
-  vpc_id                  = module.vpc.vpc_id
-  private_subnet_ids      = module.vpc.private_subnet_ids
-  public_subnet_ids       = module.vpc.public_subnet_ids
-  endpoint_private_access = true
-  endpoint_public_access  = true
-  trusted_api_cidr_blocks = var.spoke_vpc_cidrs
+  source                          = "../../modules/eks"
+  env                             = var.env
+  cluster_name                    = var.cluster_name
+  cluster_version                 = var.eks_cluster_version
+  vpc_id                          = module.vpc.vpc_id
+  private_subnet_ids              = module.vpc.private_subnet_ids
+  public_subnet_ids               = module.vpc.public_subnet_ids
+  endpoint_private_access         = true
+  endpoint_public_access          = true
+  trusted_api_cidr_blocks         = var.spoke_vpc_cidrs
+  clustermesh_trusted_cidr_blocks = var.spoke_vpc_cidrs
+  enable_karpenter_discovery      = false
 }
 
 # ── Node role, access entry, then the node group - IN THAT ORDER ───────────
@@ -107,18 +109,22 @@ resource "aws_eks_access_entry" "platform_nodes" {
 # (fastapi-app, postgresql) don't run on hub at all; hub is control-plane-only
 # for the fleet, same division of responsibility as before.
 module "eks_node_group_platform" {
-  source          = "../../modules/eks-node-group"
-  env             = var.env
-  cluster_name    = module.eks.cluster_name
-  node_group_name = "platform"
-  node_role_arn   = module.eks_node_role_platform.role_arn
-  subnet_ids      = module.vpc.private_subnet_ids
-  instance_types  = [var.master_instance_type, var.worker_instance_type]
-  desired_size    = var.worker_desired
-  min_size        = var.worker_min
-  max_size        = var.worker_max
-  disk_size       = var.worker_volume_size
-
+  source                    = "../../modules/eks-node-group"
+  env                       = var.env
+  cluster_name              = module.eks.cluster_name
+  node_group_name           = "platform"
+  node_role_arn             = module.eks_node_role_platform.role_arn
+  subnet_ids                = module.vpc.private_subnet_ids
+  instance_types            = [var.master_instance_type, var.worker_instance_type]
+  desired_size              = var.worker_desired
+  min_size                  = var.worker_min
+  max_size                  = var.worker_max
+  disk_size                 = var.worker_volume_size
+  cluster_security_group_id = module.eks.cluster_security_group_id
+  additional_security_group_ids = [
+    module.eks.clustermesh_security_group_id,
+    module.eks.node_shared_security_group_id # the only one CCM should touch
+  ]
   depends_on = [aws_eks_access_entry.platform_nodes]
 }
 

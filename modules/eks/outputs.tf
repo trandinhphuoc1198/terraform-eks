@@ -36,3 +36,8 @@ output "cluster_role_arn" {
 output "cluster_version" {
   value = aws_eks_cluster.this.version
 }
+
+output "clustermesh_security_group_id" {
+  description = "Attach to node group launch templates so Cilium Cluster Mesh traffic from the peer cluster's VPC is admitted"
+  value       = aws_security_group.clustermesh.id
+}

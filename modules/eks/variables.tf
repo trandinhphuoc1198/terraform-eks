@@ -53,16 +53,20 @@ variable "trusted_api_cidr_blocks" {
   default     = []
 }
 
-# NOTE: access entries are deliberately NOT managed inside this module.
-# They're created at the root (live/hub, live/spoke) instead, because:
-#   1. Node-role access entries reference module.eks_node_group_platform's
-#      IAM role, and that module takes this module's cluster_name as an
-#      input - wiring access_entries in here would create a dependency
-#      cycle (eks -> node group -> eks).
-#   2. EKS's API auth mode requires a node role's access entry to exist
-#      BEFORE any node using that role tries to join, or the node comes up
-#      stuck NotReady with no obvious error. That ordering has to be
-#      enforced with an explicit depends_on at the root, which isn't
-#      expressible cleanly from inside this module.
-# See live/hub/main.tf and live/spoke/main.tf for the actual access-entry
-# resources and their ordering.
+variable "clustermesh_trusted_cidr_blocks" {
+  description = "Peer cluster VPC CIDR(s) allowed to reach this cluster's nodes for Cilium Cluster Mesh - WireGuard (UDP 51871) and the clustermesh-apiserver NodePort (TCP 32379). Mirrors modules/ec2's old vpc_cidr_supernet SG rule."
+  type        = list(string)
+  default     = []
+}
+
+variable "clustermesh_nodeport" {
+  description = "NodePort clustermesh-apiserver is exposed on"
+  type        = number
+  default     = 32379
+}
+
+variable "enable_karpenter_discovery" {
+  description = "Tags private subnets with karpenter.sh/discovery=<cluster_name>. false on the hub, since it no longer runs Karpenter."
+  type        = bool
+  default     = true
+}
