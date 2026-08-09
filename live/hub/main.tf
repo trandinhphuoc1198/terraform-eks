@@ -465,6 +465,12 @@ resource "aws_iam_role_policy" "argocd_registration_ci" {
         Resource = module.eks.cluster_arn
       },
       {
+        Sid      = "ListClustersForHubLookup"
+        Effect   = "Allow"
+        Action   = ["eks:ListClusters"]
+        Resource = "*"
+      },
+      {
         Sid      = "ReadSpokeRegistrationSecrets"
         Effect   = "Allow"
         Action   = ["secretsmanager:DescribeSecret", "secretsmanager:GetSecretValue"]
