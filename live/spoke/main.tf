@@ -60,7 +60,7 @@ module "eks" {
   endpoint_private_access         = true
   endpoint_public_access          = true
   trusted_api_cidr_blocks         = [var.hub_vpc_cidr] # lets the hub's ArgoCD reach this apiserver over TGW
-  clustermesh_trusted_cidr_blocks = var.hub_vpc_cidr
+  clustermesh_trusted_cidr_blocks = [var.hub_vpc_cidr]
   enable_karpenter_discovery      = true
 }
 

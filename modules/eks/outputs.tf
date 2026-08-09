@@ -41,3 +41,8 @@ output "clustermesh_security_group_id" {
   description = "Attach to node group launch templates so Cilium Cluster Mesh traffic from the peer cluster's VPC is admitted"
   value       = aws_security_group.clustermesh.id
 }
+
+output "node_shared_security_group_id" {
+  description = "The security group shared by all node groups - only the AWS Cloud Controller Manager should modify this"
+  value       = aws_security_group.node_shared.id
+}
