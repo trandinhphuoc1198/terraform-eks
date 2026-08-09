@@ -33,7 +33,7 @@ resource "aws_security_group" "cluster_additional" {
   dynamic "ingress" {
     for_each = length(var.trusted_api_cidr_blocks) > 0 ? [1] : []
     content {
-      description = "kube-apiserver (443) from trusted peer CIDRs, e.g. the other cluster's VPC over TGW"
+      description = "kube-apiserver 443 from trusted peer CIDRs  the other cluster's VPC over TGW"
       from_port   = 443
       to_port     = 443
       protocol    = "tcp"

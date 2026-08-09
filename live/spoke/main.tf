@@ -523,11 +523,3 @@ resource "aws_eks_access_policy_association" "ci_admin" {
   depends_on = [aws_eks_access_entry.ci]
 }
 
-output "argocd_registration_ci_role_arn" {
-  value = aws_iam_role.argocd_registration_ci.arn
-}
-
-output "karpenter_node_role_name" {
-  description = "Pass this to platform/karpenter/spoke's EC2NodeClass.spec.role via the ApplicationSet's helm.parameters"
-  value       = module.eks_node_role_karpenter.role_name
-}

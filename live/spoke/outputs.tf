@@ -19,3 +19,12 @@ output "irsa_role_arns" {
   description = "Map of role_key -> IAM role ARN from modules/irsa. Annotate the matching ServiceAccount in the gitops repo with eks.amazonaws.com/role-arn = this value (e.g. irsa_role_arns[\"ebs-csi-controller\"] -> aws-ebs-csi-driver's ebs-csi-controller-sa)."
   value       = module.irsa.role_arns
 }
+
+output "argocd_registration_ci_role_arn" {
+  value = aws_iam_role.argocd_registration_ci.arn
+}
+
+output "karpenter_node_role_name" {
+  description = "Pass this to platform/karpenter/spoke's EC2NodeClass.spec.role via the ApplicationSet's helm.parameters"
+  value       = module.eks_node_role_karpenter.role_name
+}
