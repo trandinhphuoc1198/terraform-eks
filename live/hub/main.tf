@@ -119,8 +119,7 @@ resource "helm_release" "cilium" {
   version    = var.cilium_version
   namespace  = "kube-system"
 
-  wait    = true
-  timeout = 600
+  wait = false
 
   depends_on = [module.eks]
 
@@ -158,7 +157,7 @@ module "eks_node_group_platform" {
   node_group_name           = "platform"
   node_role_arn             = module.eks_node_role_platform.role_arn
   subnet_ids                = module.vpc.private_subnet_ids
-  instance_types            = [var.master_instance_type, var.worker_instance_type]
+  instance_types            = [var.worker_instance_type]
   desired_size              = var.worker_desired
   min_size                  = var.worker_min
   max_size                  = var.worker_max
