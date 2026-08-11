@@ -102,3 +102,15 @@ variable "aws_ccm_version" {
   type    = string
   default = "0.0.11"
 }
+
+variable "cilium_version" {
+  description = "Cilium helm chart version - installed via Terraform (helm_release), before any node exists"
+  type        = string
+  default     = "1.20.0-rc.1"
+}
+
+variable "aws_ccm_version" {
+  description = "AWS Cloud Controller Manager helm chart version"
+  type        = string
+  default     = "0.0.11"
+}

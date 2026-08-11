@@ -130,23 +130,23 @@ resource "helm_release" "aws_ccm" {
 # Untainted - this is where everything lands by default. Workload pods
 # (fastapi-app, postgresql) don't run on hub at all; hub is control-plane-only
 # for the fleet, same division of responsibility as before.
- module "eks_node_group_platform" {
-   source                    = "../../modules/eks-node-group"
-   env                       = var.env
-   cluster_name              = module.eks.cluster_name
-   node_group_name           = "platform"
-   node_role_arn             = module.eks_node_role_platform.role_arn
-   subnet_ids                = module.vpc.private_subnet_ids  
-   instance_types            = [var.master_instance_type, var.worker_instance_type]
-   desired_size              = var.worker_desired
-   min_size                  = var.worker_min
-   max_size                  = var.worker_max
-   disk_size                 = var.worker_volume_size
-   cluster_security_group_id = module.eks.cluster_security_group_id
-   additional_security_group_ids = [
-     module.eks.clustermesh_security_group_id,
-     module.eks.node_shared_security_group_id
-   ]
+module "eks_node_group_platform" {
+  source                    = "../../modules/eks-node-group"
+  env                       = var.env
+  cluster_name              = module.eks.cluster_name
+  node_group_name           = "platform"
+  node_role_arn             = module.eks_node_role_platform.role_arn
+  subnet_ids                = module.vpc.private_subnet_ids
+  instance_types            = [var.master_instance_type, var.worker_instance_type]
+  desired_size              = var.worker_desired
+  min_size                  = var.worker_min
+  max_size                  = var.worker_max
+  disk_size                 = var.worker_volume_size
+  cluster_security_group_id = module.eks.cluster_security_group_id
+  additional_security_group_ids = [
+    module.eks.clustermesh_security_group_id,
+    module.eks.node_shared_security_group_id
+  ]
   depends_on = [aws_eks_access_entry.platform_nodes, helm_release.cilium]
 }
 
@@ -162,7 +162,7 @@ resource "aws_eks_addon" "coredns" {
   resolve_conflicts_on_update = "OVERWRITE"
 
   depends_on = [module.eks_node_group_platform]
- }
+}
 
 # ── Karpenter node IAM role + access entry ──────────────────────────────────
 # Karpenter's EC2NodeClass (platform/karpenter/spoke) references this role's
