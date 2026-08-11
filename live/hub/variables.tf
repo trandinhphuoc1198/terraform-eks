@@ -52,13 +52,6 @@ variable "private_subnet_cidrs" {
   type        = list(string)
 }
 
-# ── EC2 / Master ──────────────────────────────────────────────────────────────
-variable "master_instance_type" {
-  description = "EC2 instance type for the master node"
-  type        = string
-}
-
-
 # ── ASG / Workers ─────────────────────────────────────────────────────────────
 variable "worker_instance_type" {
   description = "EC2 instance type for all worker nodes"
