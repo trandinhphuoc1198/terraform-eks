@@ -12,7 +12,6 @@ private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
 # Add one entry per spoke as your fleet grows.
 spoke_vpc_cidrs = ["10.1.0.0/16"]
 
-master_instance_type = "c7i-flex.large"
 worker_instance_type = "m7i-flex.large"
 
 worker_min         = 1

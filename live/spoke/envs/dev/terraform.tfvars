@@ -10,7 +10,6 @@ private_subnet_cidrs = ["10.1.11.0/24", "10.1.12.0/24"]
 # Must match live/hub's vpc_cidr.
 hub_vpc_cidr = "10.0.0.0/16"
 
-master_instance_type = "c7i-flex.large"
 worker_instance_type = "c7i-flex.large"
 
 worker_min         = 1
