@@ -41,7 +41,9 @@ permissions:
   contents: read
 
 jobs:
-  # ── 1. live/hub terraform apply ──────────────────────────────────────────
+  # ── 1. live/hub terraform apply - now installs Cilium/CCM inline via
+  #      helm_release before the node group is even created, so nodes join
+  #      Ready and there's no more separate CI bootstrap job for CNI ──────
   deploy-hub:
     name: "hub infra (${{ inputs.environment }})"
     uses: ./.github/workflows/terraform-apply.yml
@@ -54,17 +56,16 @@ jobs:
     secrets:
       AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
-  # ── 2. Cilium + AWS CCM on the hub (solves the same chicken-and-egg
-  #      problem the old master's inline bootstrap solved) ─────────────────
+  # ── 2. Sanity check nodes are actually Ready before Argo CD installs ────
   bootstrap-cluster-hub:
-    name: "bootstrap cluster (hub, ${{ inputs.environment }})"
+    name: "verify nodes ready (hub, ${{ inputs.environment }})"
     needs: deploy-hub
     uses: ./.github/workflows/k8s-cluster-bootstrap.yml
     with:
       working_directory: live/hub
       environment: ${{ inputs.environment }}
       aws_region: ${{ vars.AWS_REGION }}
-      install_cni_ccm: true
+      wait_for_nodes: true
     secrets: inherit
 
   # ── 3. Argo CD install (hub only, one-time/idempotent) ──────────────────

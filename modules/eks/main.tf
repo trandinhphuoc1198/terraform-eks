@@ -164,17 +164,6 @@ resource "aws_eks_cluster" "this" {
   depends_on = [aws_iam_role_policy_attachment.cluster_policy]
 }
 
-# ── CoreDNS addon ────────────────────────────────────────────────────────────
-# Tolerates being scheduled before Cilium's CNI is up (EKS retries pod
-# placement once networking is available) - safe to create alongside the
-# cluster rather than gating it behind Cilium via ArgoCD.
-resource "aws_eks_addon" "coredns" {
-  cluster_name                = aws_eks_cluster.this.name
-  addon_name                  = "coredns"
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [aws_eks_cluster.this]
-}
 
 # Tags EKS's own auto-created cluster security group so Karpenter's
 # EC2NodeClass can discover it by tag (karpenter.sh/discovery), same

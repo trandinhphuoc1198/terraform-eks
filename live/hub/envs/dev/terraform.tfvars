@@ -20,7 +20,7 @@ worker_max         = 3
 worker_desired     = 2
 worker_volume_size = 20
 
-eks_cluster_version = "1.33"
+eks_cluster_version = "1.36"
 
 bucket_names = [
   "tempo-s3-phuoctd6",

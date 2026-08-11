@@ -1,32 +1,18 @@
 name: k8s-cluster-bootstrap
 
-# EKS replacement for the old kubeadm k8s-cluster-bootstrap.yml. There is no
-# master instance and no SSM send-command step anymore - the EKS control
-# plane is already up the moment `terraform apply` finishes (live/*/main.tf's
-# module "eks"). What THIS workflow still has to solve is the same
-# chicken-and-egg problem the old master_init.sh.tpl solved inline:
-#
-#   HUB: ArgoCD's own pods need real pod networking to schedule, but pod
-#   networking is normally installed BY ArgoCD (Cilium as an ArgoCD
-#   Application). So on hub, install Cilium + AWS CCM imperatively via CI
-#   FIRST (Cilium's agent DaemonSet uses hostNetwork so it can schedule on a
-#   NotReady/no-CNI node - same reason this worked inline on the kubeadm
-#   master), wait for nodes to reach Ready, and only THEN let ArgoCD
-#   "adopt" Cilium/CCM as Applications (same pattern the original repo
-#   already used: helm-installed once, reconciled by ArgoCD from then on).
-#
-#   SPOKE: install_cni_ccm stays false - the hub's ArgoCD reaches a spoke's
-#   API server directly over TGW (control-plane traffic, doesn't need the
-#   spoke's own pod network) and creates the Cilium Application there. Cilium's
-#   hostNetwork DaemonSet then bootstraps pod networking for everything else
-#   on the spoke, with no CI-side install needed. This job just confirms the
-#   apiserver is reachable, same as the kubeadm version's spoke path.
+# Confirms the cluster's API server is reachable and (hub only) that nodes
+# have reached Ready. CNI/CCM installation moved into Terraform itself
+# (live/hub/main.tf's helm_release.cilium / helm_release.aws_ccm) so the
+# dependency on the node group is enforced by Terraform's own graph instead
+# of by CI job ordering - see PR: node group + coredns addon hanging forever
+# because this workflow used to install Cilium in a job that only ran AFTER
+# the node group had already been created (and was stuck NotReady with no
+# CNI at all).
 
 on:
   workflow_call:
     inputs:
       working_directory:
-        description: "live/hub, live/spoke, or any other spoke root (e.g. live/spoke-2)"
         type: string
         required: true
       environment:
@@ -35,16 +21,10 @@ on:
       aws_region:
         type: string
         required: true
-      install_cni_ccm:
-        description: "true for hub (installs Cilium+CCM inline via this workflow), false for spokes (hub's ArgoCD installs them after registration)"
+      wait_for_nodes:
+        description: "true for hub (nodes should already be Ready - Cilium was installed by Terraform before the node group existed), false for spoke (nodes stay NotReady until the hub's ArgoCD installs Cilium after registration)"
         type: boolean
         default: true
-      cilium_version:
-        type: string
-        default: "1.20.0-rc.1"
-      aws_ccm_version:
-        type: string
-        default: "0.0.11"
     secrets:
       AWS_DEPLOY_ROLE_ARN:
         required: true
@@ -71,12 +51,6 @@ jobs:
         with:
           terraform_version: "1.9.0"
 
-      - name: Set up Helm
-        if: inputs.install_cni_ccm
-        uses: azure/setup-helm@v4
-        with:
-          version: v3.15.2
-
       - name: terraform init
         run: terraform init -backend-config="envs/${{ inputs.environment }}/backend.hcl"
 
@@ -84,50 +58,16 @@ jobs:
         id: cluster
         run: echo "name=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
 
-      # AWS_DEPLOY_ROLE_ARN is the identity that ran `terraform apply` and
-      # therefore holds implicit cluster-admin via module.eks's
-      # bootstrap_cluster_creator_admin_permissions = true - no separate
-      # access entry needed for this step.
       - name: Connect kubectl to the cluster
         uses: ./.github/actions/eks-connect
         with:
           cluster-name: ${{ steps.cluster.outputs.name }}
           aws-region: ${{ inputs.aws_region }}
 
-      - name: Install Cilium + AWS CCM (hub only)
-        if: inputs.install_cni_ccm
-        run: |
-          set -euo pipefail
-          helm repo add cilium https://helm.cilium.io/
-          helm repo add aws-cloud-controller-manager https://kubernetes.github.io/cloud-provider-aws
-          helm repo update
+      - name: Wait for nodes to become Ready (hub only - Cilium already installed by Terraform)
+        if: inputs.wait_for_nodes
+        run: kubectl wait node --all --for=condition=Ready --timeout=180s
 
-          echo "=== Installing Cilium (hostNetwork DaemonSet - schedules even on NotReady/no-CNI nodes) ==="
-          for i in $(seq 1 5); do
-            helm upgrade --install cilium cilium/cilium \
-              --version "${{ inputs.cilium_version }}" \
-              --namespace kube-system \
-              --create-namespace \
-              -f ../../platform/values/base/cilium.yaml \
-              -f ../../platform/values/hub/cilium.yaml \
-              --wait --timeout=10m && break
-            echo "Cilium install attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-
-          echo "=== Installing AWS Cloud Controller Manager ==="
-          helm upgrade --install aws-cloud-controller-manager aws-cloud-controller-manager/aws-cloud-controller-manager \
-            --namespace kube-system \
-            -f ../../platform/values/base/aws-ccm.yaml \
-            -f ../../platform/values/hub/aws-ccm.yaml \
-            --version "${{ inputs.aws_ccm_version }}"
-
-          echo "=== Waiting for the uninitialized taint to clear ==="
-          timeout 240 bash -c 'until ! kubectl get nodes -o json | grep -q "node.cloudprovider.kubernetes.io/uninitialized"; do sleep 5; done'
-
-          echo "=== Waiting for nodes to become Ready ==="
-          kubectl wait node --all --for=condition=Ready --timeout=180s
-
-      - name: Verify apiserver is reachable (spoke - nodes stay NotReady until hub's ArgoCD installs Cilium/CCM after registration)
-        if: ${{ !inputs.install_cni_ccm }}
+      - name: Verify apiserver is reachable (spoke - nodes stay NotReady until hub's ArgoCD installs Cilium after registration)
+        if: ${{ !inputs.wait_for_nodes }}
         run: kubectl get --raw='/readyz'

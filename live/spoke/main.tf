@@ -81,34 +81,88 @@ resource "aws_eks_access_entry" "platform_nodes" {
   type          = "EC2_LINUX"
 }
 
-# ── Managed Node Group: baseline platform pool ──────────────────────────────
-# Runs cilium-operator, coredns, cert-manager, KEDA, CNPG operator, Karpenter
-# itself, etc. Karpenter's controller runs HERE (on the stable MNG pool), not
-# on the elastic pool it manages - same reasoning as the old "Karpenter on
-# the master" placement (avoid the controller terminating its own node
-# mid-drain), just moved from "the master" to "the platform MNG" since
-# there's no master anymore.
-module "eks_node_group_platform" {
-  source                    = "../../modules/eks-node-group"
-  env                       = var.env
-  cluster_name              = module.eks.cluster_name
-  node_group_name           = "platform"
-  node_role_arn             = module.eks_node_role_platform.role_arn
-  subnet_ids                = module.vpc.private_subnet_ids
-  instance_types            = [var.master_instance_type, var.worker_instance_type]
-  desired_size              = var.worker_desired
-  min_size                  = var.worker_min
-  max_size                  = var.worker_max
-  disk_size                 = var.worker_volume_size
-  cluster_security_group_id = module.eks.cluster_security_group_id
-  additional_security_group_ids = [
-    module.eks.clustermesh_security_group_id,
-    module.eks.node_shared_security_group_id # the only one CCM should touch
-  ]
 
+# ── Bootstrap-only CNI + CCM install ─────────────────────────────────────
+# Chart defaults, no custom values file - this is a "just enough to let
+# nodes go Ready" install, not the final config. ArgoCD adopts both
+# releases afterward (same release name/namespace, so it's a takeover, not
+# a second install) and applies the repo's real values from
+# platform/values/* - that's what actually configures kube-proxy
+# replacement, ENI IPAM mode, native routing, etc. Terraform's only job
+# here is breaking the chicken-and-egg: the node group cannot come up
+# Ready with zero CNI present at all, so *something* has to exist first.
+resource "helm_release" "cilium" {
+  name       = "cilium"
+  repository = "https://helm.cilium.io/"
+  chart      = "cilium"
+  version    = var.cilium_version
+  namespace  = "kube-system"
 
-  depends_on = [aws_eks_access_entry.platform_nodes]
+  wait    = true
+  timeout = 600
+
+  depends_on = [module.eks]
+
+  # ArgoCD reconciles this Application (and therefore its values) on its
+  # own schedule after adoption - Terraform should not fight drift once
+  # the real values from git are applied on top of this bootstrap install.
+  lifecycle {
+    ignore_changes = [values, set, set_sensitive]
+  }
 }
+
+resource "helm_release" "aws_ccm" {
+  name       = "aws-cloud-controller-manager"
+  repository = "https://kubernetes.github.io/cloud-provider-aws"
+  chart      = "aws-cloud-controller-manager"
+  version    = var.aws_ccm_version
+  namespace  = "kube-system"
+
+  depends_on = [helm_release.cilium]
+
+  lifecycle {
+    ignore_changes = [values, set, set_sensitive]
+  }
+}
+
+# ── Managed Node Group: baseline platform pool ──────────────────────────────
+# Runs ArgoCD, cilium-operator, coredns, cert-manager, external-secrets, etc.
+# Untainted - this is where everything lands by default. Workload pods
+# (fastapi-app, postgresql) don't run on hub at all; hub is control-plane-only
+# for the fleet, same division of responsibility as before.
+ module "eks_node_group_platform" {
+   source                    = "../../modules/eks-node-group"
+   env                       = var.env
+   cluster_name              = module.eks.cluster_name
+   node_group_name           = "platform"
+   node_role_arn             = module.eks_node_role_platform.role_arn
+   subnet_ids                = module.vpc.private_subnet_ids  
+   instance_types            = [var.master_instance_type, var.worker_instance_type]
+   desired_size              = var.worker_desired
+   min_size                  = var.worker_min
+   max_size                  = var.worker_max
+   disk_size                 = var.worker_volume_size
+   cluster_security_group_id = module.eks.cluster_security_group_id
+   additional_security_group_ids = [
+     module.eks.clustermesh_security_group_id,
+     module.eks.node_shared_security_group_id
+   ]
+  depends_on = [aws_eks_access_entry.platform_nodes, helm_release.cilium]
+}
+
+# ── CoreDNS addon ────────────────────────────────────────────────────────────
+# Moved up from modules/eks so it can depend on the node group directly -
+# it previously only depended on the cluster existing, which meant it raced
+# aws_eks_node_group.this in parallel, both silently blocked on the same
+# missing CNI. Now it waits for real, Ready nodes with working pod
+# networking before EKS tries to schedule CoreDNS pods.
+resource "aws_eks_addon" "coredns" {
+  cluster_name                = module.eks.cluster_name
+  addon_name                  = "coredns"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [module.eks_node_group_platform]
+ }
 
 # ── Karpenter node IAM role + access entry ──────────────────────────────────
 # Karpenter's EC2NodeClass (platform/karpenter/spoke) references this role's

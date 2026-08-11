@@ -114,7 +114,7 @@ modules/                 Reusable Terraform modules
 | Module | Purpose | Wired into `live/*`? |
 |---|---|---|
 | [`vpc`](modules/vpc/README.md) | VPC, public/private subnets, NAT Gateway, S3 gateway endpoint, SSM interface endpoints, optional `karpenter.sh/discovery` tagging | Yes |
-| `eks` | EKS control plane, cluster IAM role, additional control-plane SG, CoreDNS addon, OIDC issuer output | Yes |
+| `eks` | EKS control plane, cluster IAM role, additional control-plane SG, OIDC issuer output | Yes |
 | `eks-node-role` | Node-pool IAM role (worker policy, ECR read-only, SSM) - split from `eks-node-group` so its access entry can exist before nodes join | Yes |
 | `eks-node-group` | Managed Node Group for the baseline "platform" pool (Argo CD, cilium-operator, coredns, cert-manager, external-secrets, etc.) | Yes |
 | [`irsa`](modules/irsa/README.md) | Registers a cluster's OIDC issuer with AWS + one trust-scoped IAM role per ServiceAccount | Yes |

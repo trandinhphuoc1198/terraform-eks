@@ -26,6 +26,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.15"
+   }
   }
 }
 
@@ -42,5 +46,22 @@ data "terraform_remote_state" "network" {
     bucket = "terraform-phuoctd6"
     key    = var.network_state_key
     region = "ap-northeast-1"
+  }
+}
+
+# Auths against the hub cluster using the same identity that ran
+# `terraform apply` (bootstrap_cluster_creator_admin_permissions = true on
+# module.eks gives it implicit cluster-admin - no separate access entry
+# needed here, same reasoning k8s-cluster-bootstrap.yml's old inline
+# install relied on).
+data "aws_eks_cluster_auth" "this" {
+  name = module.eks.cluster_name
+}
+
+provider "helm" {
+  kubernetes = {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    token                  = data.aws_eks_cluster_auth.this.token
   }
 }
