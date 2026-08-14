@@ -15,3 +15,8 @@ output "irsa_role_arns" {
   description = "Map of role_key -> IAM role ARN from modules/irsa. Annotate the matching ServiceAccount in the gitops repo with eks.amazonaws.com/role-arn = this value (e.g. irsa_role_arns[\"ebs-csi-controller\"] -> aws-ebs-csi-driver's ebs-csi-controller-sa)."
   value       = module.irsa.role_arns
 }
+
+output "cluster_name" {
+  description = "Hub's EKS cluster name - read by deploy-hub.yml, k8s-cluster-bootstrap.yml, k8s-bootstrap-argocd.yml, and drain-cluster.yml via `terraform output -raw cluster_name`"
+  value       = module.eks.cluster_name
+}
