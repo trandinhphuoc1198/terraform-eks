@@ -121,11 +121,23 @@ resource "helm_release" "cilium" {
 
   wait = false
 
+  set = [
+    {
+      name  = "kubeProxyReplacement"
+      value = "true"
+    },
+    {
+      name  = "k8sServiceHost"
+      value = replace(module.eks.cluster_endpoint, "https://", "")
+    },
+    {
+      name  = "k8sServicePort"
+      value = "443"
+    }
+  ]
+
   depends_on = [module.eks]
 
-  # ArgoCD reconciles this Application (and therefore its values) on its
-  # own schedule after adoption - Terraform should not fight drift once
-  # the real values from git are applied on top of this bootstrap install.
   lifecycle {
     ignore_changes = [values, set, set_sensitive]
   }
