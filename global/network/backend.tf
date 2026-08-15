@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.5.0"
 
   backend "s3" {
-    bucket       = "terraform-phuoctd6"
+    bucket       = "terraform-eks-phuoctd6"
     region       = "us-east-1"
     use_lockfile = true
     encrypt      = true

@@ -5,7 +5,7 @@ terraform {
   # -backend-config so this file is identical across every environment.
   # See envs/<env>/backend.hcl.
   backend "s3" {
-    bucket       = "terraform-phuoctd6"
+    bucket       = "terraform-eks-phuoctd6"
     region       = "us-east-1"
     use_lockfile = true
     encrypt      = true
@@ -40,7 +40,7 @@ provider "aws" {
 data "terraform_remote_state" "network" {
   backend = "s3"
   config = {
-    bucket = "terraform-phuoctd6"
+    bucket = "terraform-eks-phuoctd6"
     key    = var.network_state_key
     region = "us-east-1"
   }
