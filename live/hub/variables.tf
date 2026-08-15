@@ -97,7 +97,7 @@ variable "eks_cluster_version" {
 variable "cilium_version" {
   description = "Cilium helm chart version - installed via Terraform (helm_release), before any node exists"
   type        = string
-  default     = "1.20.0-rc.1"
+  default     = "1.20.0"
 }
 
 variable "aws_ccm_version" {
