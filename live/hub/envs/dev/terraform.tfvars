@@ -26,4 +26,4 @@ bucket_names = [
   "loki-s3-phuoctd6"
 ]
 
-additional_admin_principal_arns = ["arn:aws:iam::164892691239:root"]
+additional_admin_principal_arns = ["arn:aws:iam::164892691239:root", "arn:aws:iam::164892691239:user/admin"]
