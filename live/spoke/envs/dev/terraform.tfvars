@@ -18,3 +18,5 @@ worker_desired     = 1
 worker_volume_size = 20
 
 eks_cluster_version = "1.33"
+
+additional_admin_principal_arns = ["arn:aws:iam::164892691239:root"]

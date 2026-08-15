@@ -25,3 +25,5 @@ bucket_names = [
   "tempo-s3-phuoctd6",
   "loki-s3-phuoctd6"
 ]
+
+additional_admin_principal_arns = ["arn:aws:iam::164892691239:root"]

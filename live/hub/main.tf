@@ -539,3 +539,32 @@ resource "aws_iam_role_policy" "argocd_registration_ci" {
 output "argocd_registration_ci_role_arn" {
   value = aws_iam_role.argocd_registration_ci.arn
 }
+
+# ── Additional admin access entries (human/debug access) ───────────────────
+# Same mechanism as aws_eks_access_entry.ci above, just for whatever
+# principals var.additional_admin_principal_arns lists (e.g. the AWS
+# account root ARN, or - better - a named IAM role/user). Without an
+# entry here, being IAM admin/root grants ZERO Kubernetes RBAC under this
+# cluster's authentication_mode = "API" (modules/eks/main.tf) - IAM and
+# in-cluster RBAC are separate authorization layers under this mode.
+resource "aws_eks_access_entry" "additional_admins" {
+  for_each = toset(var.additional_admin_principal_arns)
+
+  cluster_name  = module.eks.cluster_name
+  principal_arn = each.value
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "additional_admins" {
+  for_each = toset(var.additional_admin_principal_arns)
+
+  cluster_name  = module.eks.cluster_name
+  principal_arn = each.value
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.additional_admins]
+}

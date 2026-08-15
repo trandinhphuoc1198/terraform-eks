@@ -105,3 +105,17 @@ variable "aws_ccm_version" {
   type        = string
   default     = "0.0.11"
 }
+
+variable "additional_admin_principal_arns" {
+  description = <<-EOT
+    IAM principal ARNs (users, roles, or the account root - arn:aws:iam::<account-id>:root)
+    to grant cluster-admin EKS access entries on top of the CI role
+    (argocd_registration_ci) and the terraform-apply identity (which gets
+    admin automatically via bootstrap_cluster_creator_admin_permissions).
+    Use this for human/debug access instead of relying on the AWS account
+    root principal implicitly - each entry here is explicit, tracked in
+    state, and revocable by removing it from the list.
+  EOT
+  type        = list(string)
+  default     = []
+}
