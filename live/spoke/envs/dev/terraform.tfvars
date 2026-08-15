@@ -1,5 +1,5 @@
 env          = "spoke-dev"
-region       = "ap-northeast-1"
+region       = "us-east-1"
 cluster_name = "spoke-dev-k8s"
 
 # Distinct address space from the hub - required for TGW routing.

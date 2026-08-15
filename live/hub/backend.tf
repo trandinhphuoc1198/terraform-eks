@@ -6,7 +6,7 @@ terraform {
   # See envs/<env>/backend.hcl.
   backend "s3" {
     bucket       = "terraform-phuoctd6"
-    region       = "ap-northeast-1"
+    region       = "us-east-1"
     use_lockfile = true
     encrypt      = true
   }
@@ -45,7 +45,7 @@ data "terraform_remote_state" "network" {
   config = {
     bucket = "terraform-phuoctd6"
     key    = var.network_state_key
-    region = "ap-northeast-1"
+    region = "us-east-1"
   }
 }
 

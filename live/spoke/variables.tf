@@ -7,7 +7,7 @@ variable "env" {
 variable "region" {
   description = "AWS region to deploy this cluster into"
   type        = string
-  default     = "ap-northeast-1"
+  default     = "us-east-1"
 }
 
 variable "network_state_key" {
