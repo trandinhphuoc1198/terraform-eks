@@ -85,3 +85,9 @@ variable "cluster_security_group_id" {
   description = "EKS's auto-created cluster security group (module.eks.cluster_security_group_id). Required once a launch template is used - specifying network_interfaces.security_groups on the launch template REPLACES EKS's default SG attachment, so this must be included explicitly or nodes lose control-plane connectivity."
   type        = string
 }
+
+variable "metadata_http_put_response_hop_limit" {
+  description = "IMDSv2 hop limit for instances in this node group. Default AWS value is 1, which blocks IMDS access from a pod's network namespace (e.g. cilium-operator's ENI IPAM calls when not truly on the host netns) - 2 allows one extra hop through the container network."
+  type        = number
+  default     = 2
+}

@@ -14,6 +14,22 @@ resource "aws_launch_template" "this" {
     )
   }
 
+  # IMDSv2 enforced (http_tokens = required), with a hop limit above AWS's
+  # default of 1 - default 1 only reaches processes in the host's own
+  # network namespace. cilium-operator's ENI IPAM calls (CreateNetworkInterface,
+  # AttachNetworkInterface, etc. - see the cilium_operator_irsa_policy /
+  # platform_node_cilium_eni role policy in live/hub|spoke/main.tf) need to
+  # reach IMDS across one extra hop from the pod network namespace, which a
+  # hop limit of 1 silently drops with no obvious error beyond IMDS calls
+  # timing out. Tunable via var.metadata_http_put_response_hop_limit if a
+  # given node group never needs more than the AWS default.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = var.metadata_http_put_response_hop_limit
+    instance_metadata_tags      = "disabled"
+  }
+
   tag_specifications {
     resource_type = "instance"
     tags          = { Name = "${var.env}-${var.node_group_name}-node" }
