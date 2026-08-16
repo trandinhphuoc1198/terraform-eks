@@ -82,15 +82,7 @@ resource "aws_eks_access_entry" "platform_nodes" {
 }
 
 
-# ── Bootstrap-only CNI + CCM install ─────────────────────────────────────
-# Chart defaults, no custom values file - this is a "just enough to let
-# nodes go Ready" install, not the final config. ArgoCD adopts both
-# releases afterward (same release name/namespace, so it's a takeover, not
-# a second install) and applies the repo's real values from
-# platform/values/* - that's what actually configures kube-proxy
-# replacement, ENI IPAM mode, native routing, etc. Terraform's only job
-# here is breaking the chicken-and-egg: the node group cannot come up
-# Ready with zero CNI present at all, so *something* has to exist first.
+# ── Bootstrap-only CCM install ─────────────────────────────────────
 resource "helm_release" "cilium" {
   name       = "cilium"
   repository = "https://helm.cilium.io/"
@@ -100,36 +92,32 @@ resource "helm_release" "cilium" {
 
   wait = false
 
-  set = [
-    {
-      name  = "kubeProxyReplacement"
-      value = "true"
-    },
-    {
-      name  = "k8sServiceHost"
-      value = replace(module.eks.cluster_endpoint, "https://", "")
-    },
-    {
-      name  = "k8sServicePort"
-      value = "443"
+  values = [yamlencode({
+    kubeProxyReplacement = true
+    k8sServiceHost       = replace(module.eks.cluster_endpoint, "https://", "")
+    k8sServicePort       = 443
+
+    eni = {
+      enabled          = true
+      subnetTagsFilter = ["cilium.io/pod-subnet=true"]
     }
-  ]
+    ipam = {
+      mode = "eni"
+    }
+    routingMode                = "native"
+    ipv4NativeRoutingCIDR      = var.vpc_cidr
+    egressMasqueradeInterfaces = "eth+"
 
-  depends_on = [module.eks]
+    serviceAccounts = {
+      operator = {
+        annotations = {
+          "eks.amazonaws.com/role-arn" = module.irsa.role_arns["cilium-operator"]
+        }
+      }
+    }
+  })]
 
-  lifecycle {
-    ignore_changes = [values, set, set_sensitive]
-  }
-}
-
-resource "helm_release" "aws_ccm" {
-  name       = "aws-cloud-controller-manager"
-  repository = "https://kubernetes.github.io/cloud-provider-aws"
-  chart      = "aws-cloud-controller-manager"
-  version    = var.aws_ccm_version
-  namespace  = "kube-system"
-
-  depends_on = [helm_release.cilium]
+  depends_on = [module.eks, module.irsa]
 
   lifecycle {
     ignore_changes = [values, set, set_sensitive]
