@@ -149,6 +149,12 @@ module "eks_node_group_platform" {
   depends_on = [aws_eks_access_entry.platform_nodes, helm_release.cilium]
 }
 
+resource "aws_iam_role_policy" "platform_node_cilium_eni" {
+  name   = "${var.env}-platform-node-cilium-eni-policy"
+  role   = module.eks_node_role_platform.role_name
+  policy = local.cilium_operator_irsa_policy
+}
+
 # ── CoreDNS addon ────────────────────────────────────────────────────────────
 # Moved up from modules/eks so it can depend on the node group directly -
 # it previously only depended on the cluster existing, which meant it raced

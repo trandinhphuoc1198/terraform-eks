@@ -170,6 +170,22 @@ module "eks_node_group_platform" {
   depends_on = [aws_eks_access_entry.platform_nodes, helm_release.cilium]
 }
 
+# ── Cilium operator runs hostNetwork=true, so EKS's IRSA webhook never
+# mutates it (documented behavior - hostNetwork pods are skipped). It
+# authenticates via the node's IMDS credentials instead, not the
+# cilium-operator IRSA role from module.irsa. Grant the same ENI/EC2
+# permissions to the platform node role directly so
+# `cilium-operator --config-dir=/tmp/cilium/config-map` (ipam.mode=eni)
+# can actually call DescribeInstanceTypes/CreateNetworkInterface/etc.
+# cilium_operator_irsa_policy in module.irsa is left in place too - if
+# operator.hostNetwork is ever set to false, IRSA will start working and
+# this becomes redundant rather than conflicting.
+resource "aws_iam_role_policy" "platform_node_cilium_eni" {
+  name   = "${var.env}-platform-node-cilium-eni-policy"
+  role   = module.eks_node_role_platform.role_name
+  policy = local.cilium_operator_irsa_policy
+}
+
 # ── CoreDNS addon ────────────────────────────────────────────────────────────
 # Moved up from modules/eks so it can depend on the node group directly -
 # it previously only depended on the cluster existing, which meant it raced
