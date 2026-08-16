@@ -92,12 +92,6 @@ variable "cilium_version" {
   default     = "1.20.0"
 }
 
-variable "aws_ccm_version" {
-  description = "AWS Cloud Controller Manager helm chart version"
-  type        = string
-  default     = "0.0.11"
-}
-
 variable "additional_admin_principal_arns" {
   description = <<-EOT
     IAM principal ARNs (users, roles, or the account root - arn:aws:iam::<account-id>:root)

@@ -103,7 +103,7 @@ resource "aws_eks_access_entry" "platform_nodes" {
   type          = "EC2_LINUX"
 }
 
-# ── Bootstrap-only CCM install ─────────────────────────────────────
+# ── Bootstrap-only cilium install ─────────────────────────────────────
 resource "helm_release" "cilium" {
   name       = "cilium"
   repository = "https://helm.cilium.io/"
